@@ -1,4 +1,4 @@
-.env
+.env.*
 
 # Go build output
 *.exe
