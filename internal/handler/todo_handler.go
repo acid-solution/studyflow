@@ -70,6 +70,7 @@ func (h *TodoHandler) CreateTodo(c *gin.Context) {
 	}
 
 	todo, err := h.service.CreateTodo(
+		c.Request.Context(),
 		userID,
 		service.CreateTodoInput{
 			Title:       req.Title,

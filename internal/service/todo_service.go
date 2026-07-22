@@ -66,6 +66,7 @@ type ListTodosResult struct {
 
 // 创建任务
 func (s *TodoService) CreateTodo(
+	ctx context.Context,
 	userID uint64,
 	input CreateTodoInput,
 ) (*model.Todo, error) {
@@ -78,6 +79,8 @@ func (s *TodoService) CreateTodo(
 	if err := s.repo.Create(&todo); err != nil {
 		return nil, err
 	}
+
+	s.invalidateTodoListCache(ctx, userID)
 
 	return &todo, nil
 }
