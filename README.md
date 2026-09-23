@@ -1,151 +1,166 @@
-# Go Todo
+# StudyFlow
 
-基于 Go、Gin、GORM、MySQL、Redis 和 JWT 实现的 Todo 后端学习项目，包含用户鉴权、Todo 管理、分页筛选、Redis 缓存、结构化日志和 Docker Compose 部署。
+StudyFlow 是面向个人学习执行的多用户平台。用户可以把长期目标递归拆成分目标，在任意目标下同时推进多个按日期或按课时的计划，通过版本草稿调整路线，并用任务、计时与改期记录生成周度复盘。
 
-## 功能
+项目使用独立的 `shared-auth` 认证服务。StudyFlow 只保存 JWT 中的稳定 UUID，不保存账号、密码或本地 Session。
 
-* 用户注册、登录、刷新令牌和退出登录
-* JWT 与登录 Session 鉴权
-* Todo 创建、查询、更新、完成和删除
-* Todo 分页及完成状态筛选
-* MySQL 数据持久化
-* Redis 列表缓存
-* 统一响应结构和请求日志
-* Docker 多阶段构建
-* Docker Compose 启动 API、MySQL 和 Redis
+## 已实现的业务闭环
+
+- 不限层数的目标树，支持移动、达成、放弃和 `ready_to_complete` 完成提示。
+- 同一目标下多个并行计划；计划分为 `calendar` 和 `sequence` 两种固定模式。
+- 每个计划独立维护 V1、V2 等版本；草稿从当前版本复制未完成任务，激活时保留历史版本和执行记录。
+- 阶段与任务编排，日期任务只排到天，课时计划按顺序返回下一课。
+- 首页按“逾期、今天、按课时、未来”返回任务。
+- 任务完成、重新打开、取消、改期和整数版本乐观锁。
+- 服务端计时，同一用户同时只能运行一个计时；完成任务会自动结束该任务的运行中计时。
+- 周报统计完成数、预算与实际投入、按期完成率、逾期数、改期次数、每日投入和各计划投入。
+- MySQL 版本化 Migration、UUID 用户隔离、shared-auth JWKS 本地验签。
+- React 前端已接入真实 API；计划导入与 MCP 页面明确保留为后续功能。
 
 ## 技术栈
 
-| 分类  | 技术                    |
-| --- | --------------------- |
-| 语言  | Go 1.26.4             |
-| Web | Gin                   |
-| ORM | GORM                  |
-| 数据库 | MySQL 8.4             |
-| 缓存  | Redis 8               |
-| 鉴权  | JWT                   |
-| 容器  | Docker、Docker Compose |
+| 层次 | 技术 |
+| --- | --- |
+| 前端 | React 19、TypeScript、Vite、Vitest |
+| API | Go、Gin、GORM |
+| 数据库 | MySQL 8.4、Goose Migration |
+| 身份 | shared-auth、RS256 JWT、JWKS |
+| 工程 | Docker Compose、GitHub Actions |
 
-## 项目结构
+首轮没有引入 Redis。周报和工作台直接从 MySQL 查询，后续只有在真实性能数据证明需要时才增加缓存。
+
+## 核心数据关系
 
 ```text
-go-todo/
-├── compose.yaml
-├── Dockerfile
-├── .dockerignore
-├── .env.compose.example
-├── README.md
-├── go.mod
-├── main.go
-├── static/
-└── internal/
-    ├── cache/
-    ├── config/
-    ├── database/
-    ├── handler/
-    ├── middleware/
-    ├── model/
-    ├── repository/
-    ├── response/
-    └── service/
+Goal（可递归）
+└─ Plan（同一目标可并行多个）
+   └─ PlanVersion（草稿 / 生效 / 历史）
+      ├─ Milestone
+      └─ Task
+         └─ StudySession
 ```
 
-## Docker Compose 启动
+所有业务表均保存 `user_id`。每次查询同时限制资源 ID 与当前用户；访问其他用户资源和访问不存在资源统一返回 404。
 
-复制环境变量模板。
+## 目录
 
-Linux/macOS：
-
-```bash
-cp .env.compose.example .env.compose
+```text
+studyflow/
+├─ frontend/                 React 前端
+├─ migrations/               Goose MySQL 迁移
+├─ internal/
+│  ├─ config/                环境配置
+│  ├─ database/              MySQL 与迁移启动
+│  ├─ identity/              JWKS 缓存和 JWT 校验
+│  ├─ middleware/            请求 ID 与结构化日志
+│  ├─ model/                 持久化模型
+│  ├─ response/              统一响应
+│  └─ studyflow/             领域服务与 HTTP 接口
+├─ compose.yaml
+├─ Dockerfile
+└─ main.go
 ```
 
-Windows PowerShell：
+## 本地开发
+
+### 1. 启动 shared-auth
+
+StudyFlow 默认连接 `http://127.0.0.1:18082`。shared-auth 需要为 `studyflow` 客户端允许：
+
+```text
+http://127.0.0.1:5174
+http://127.0.0.1:8081
+```
+
+### 2. 启动 MySQL
 
 ```powershell
 Copy-Item .env.compose.example .env.compose
+docker compose --env-file .env.compose up -d mysql
 ```
 
-编辑 `.env.compose`：
+### 3. 启动 API
 
-```dotenv
-MYSQL_ROOT_PASSWORD=change_me
-MYSQL_DATABASE=todo_db
-MYSQL_USER=todo_app
-MYSQL_PASSWORD=change_me
-
-JWT_SECRET=replace_with_at_least_32_characters
+```powershell
+Copy-Item .env.example .env
+go run .
 ```
 
-构建并启动：
+服务启动时会自动执行 `migrations` 中尚未应用的 Goose Migration。
 
-```bash
+### 4. 启动前端
+
+```powershell
+Set-Location frontend
+npm ci
+npm run dev
+```
+
+访问 `http://127.0.0.1:5174`。
+
+## Docker Compose 完整启动
+
+确保宿主机上的 shared-auth 已启动，然后执行：
+
+```powershell
+Copy-Item .env.compose.example .env.compose
 docker compose --env-file .env.compose up --build -d
 ```
 
-访问：
+访问 `http://127.0.0.1:8081`。生产构建由同一个 Go 服务提供前端静态资源和 `/api/v1` API。
 
-```text
-http://localhost:8081
+## 身份校验
+
+业务接口要求 `Authorization: Bearer <shared-auth access token>`。服务严格验证 RS256、`iss=shared-auth`、`aud=studyflow`、`kid`、UUID 格式的 `sub`/`sid`、`exp` 和 `iat`。签发给 `jobpilot` 的令牌不能调用 StudyFlow。
+
+## API 概览
+
+成功响应统一为 `{"code":0,"message":"success","data":{}}`。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/health/live` | 进程存活 |
+| GET | `/health/ready` | 数据库就绪 |
+| GET | `/api/v1/goals/tree` | 递归目标树 |
+| POST | `/api/v1/goals` | 创建目标或分目标 |
+| PATCH | `/api/v1/goals/:id` | 编辑或移动目标 |
+| POST | `/api/v1/goals/:id/complete` | 确认达成目标 |
+| POST | `/api/v1/goals/:id/abandon` | 放弃目标 |
+| POST | `/api/v1/goals/:id/plans` | 创建计划与 V1 草稿 |
+| GET | `/api/v1/plans` | 查询计划 |
+| GET/PATCH | `/api/v1/plans/:id` | 计划详情或编辑 |
+| POST | `/api/v1/plans/:id/versions` | 从生效版复制新草稿 |
+| POST | `/api/v1/plan-versions/:id/activate` | 激活草稿 |
+| POST | `/api/v1/plan-versions/:id/milestones` | 新建阶段 |
+| POST | `/api/v1/plan-versions/:id/tasks` | 新建任务 |
+| PATCH/DELETE | `/api/v1/milestones/:id` | 编辑或删除草稿阶段 |
+| GET/PATCH/DELETE | `/api/v1/tasks`、`/api/v1/tasks/:id` | 筛选、编辑或删除草稿任务 |
+| POST | `/api/v1/tasks/:id/complete` | 完成任务 |
+| POST | `/api/v1/tasks/:id/reopen` | 重新打开 |
+| POST | `/api/v1/tasks/:id/cancel` | 取消任务 |
+| GET | `/api/v1/tasks/:id/sessions` | 读取任务执行记录 |
+| POST | `/api/v1/tasks/:id/sessions` | 开始计时 |
+| POST | `/api/v1/sessions/:id/finish` | 结束计时 |
+| POST | `/api/v1/sessions/:id/discard` | 丢弃误开计时 |
+| GET | `/api/v1/dashboard/today` | 今日工作台 |
+| GET | `/api/v1/reviews/weekly` | 周度复盘 |
+| GET/PATCH | `/api/v1/preferences` | 用户偏好 |
+
+## 验证
+
+```powershell
+go test ./...
+
+Set-Location frontend
+npm test
+npm run typecheck
+npm run build
 ```
 
-查看状态和日志：
+数据库集成测试默认跳过。提供一个空测试数据库，并设置 `TEST_MYSQL_DSN` 后运行：
 
-```bash
-docker compose --env-file .env.compose ps
-docker compose --env-file .env.compose logs -f
+```powershell
+go test ./internal/studyflow -run TestPlanningExecutionAndReviewIntegration -v
 ```
 
-停止并删除容器：
-
-```bash
-docker compose --env-file .env.compose down
-```
-
-彻底清空 MySQL 数据：
-
-```bash
-docker compose --env-file .env.compose down -v
-```
-
-## API
-
-基础地址：
-
-```text
-http://localhost:8081/api
-```
-
-受保护接口需要请求头：
-
-```http
-Authorization: Bearer <access_token>
-```
-
-| 方法       | 路径                | 鉴权 | 说明         |
-| -------- | ----------------- | -- | ---------- |
-| `POST`   | `/register`       | 否  | 注册         |
-| `POST`   | `/login`          | 否  | 登录         |
-| `POST`   | `/refresh`        | 否  | 刷新令牌       |
-| `POST`   | `/logout`         | 是  | 退出登录       |
-| `POST`   | `/todos`          | 是  | 创建 Todo    |
-| `GET`    | `/todos`          | 是  | 查询 Todo 列表 |
-| `PUT`    | `/todos/:id`      | 是  | 更新 Todo    |
-| `PATCH`  | `/todos/:id/done` | 是  | 标记完成       |
-| `DELETE` | `/todos/:id`      | 是  | 删除 Todo    |
-
-查询 Todo 支持：
-
-```text
-GET /api/todos?page=1&page_size=10&completed=false
-```
-
-统一响应格式：
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {}
-}
-```
+测试覆盖递归目标、循环引用阻止、并行计划、版本复制与激活、用户隔离、首页分类、乐观锁、单计时约束和周报聚合。
