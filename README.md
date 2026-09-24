@@ -133,6 +133,7 @@ docker compose --env-file .env.compose up --build -d
 | POST | `/api/v1/plan-versions/:id/activate` | 激活草稿 |
 | POST | `/api/v1/plan-versions/:id/milestones` | 新建阶段 |
 | POST | `/api/v1/plan-versions/:id/tasks` | 新建任务 |
+| POST | `/api/v1/plan-imports` | 批量导入计划树（幂等） |
 | PATCH/DELETE | `/api/v1/milestones/:id` | 编辑或删除草稿阶段 |
 | GET/PATCH/DELETE | `/api/v1/tasks`、`/api/v1/tasks/:id` | 筛选、编辑或删除草稿任务 |
 | POST | `/api/v1/tasks/:id/complete` | 完成任务 |
@@ -145,6 +146,34 @@ docker compose --env-file .env.compose up --build -d
 | GET | `/api/v1/dashboard/today` | 今日工作台 |
 | GET | `/api/v1/reviews/weekly` | 周度复盘 |
 | GET/PATCH | `/api/v1/preferences` | 用户偏好 |
+
+## 计划树批量导入
+
+`POST /api/v1/plan-imports` 在一次事务里建出计划、V1 草稿、阶段和任务，用于 JobPilot 生成的学习路线导入。请求头必须带 `Idempotency-Key`（8 到 200 个可打印 ASCII 字符），作用域是当前用户。
+
+任务嵌在所属阶段里，位置由服务端按数组顺序生成，客户端不能指定：
+
+```json
+{
+  "goal_id": "目标 UUID",
+  "title": "力扣冲刺",
+  "mode": "calendar",
+  "weekly_capacity_minutes": 600,
+  "milestones": [
+    { "title": "数组与哈希", "outcome": "掌握三类模板",
+      "tasks": [{ "title": "三数之和", "estimate_minutes": 60, "scheduled_date": "2026-03-03" }] }
+  ],
+  "tasks": [{ "title": "未分阶段任务" }]
+}
+```
+
+幂等契约：
+
+- 同一个键加同一份载荷重复提交，返回第一次建好的那棵树，响应里 `replayed` 为 `true`，不会产生第二份数据。
+- 摘要算在**规范化之后**的载荷上，所以重试时多写空格、省略空字段不影响判定；同一个键配上真正不同的载荷返回 409 `idempotency_key_conflict`。
+- 任何校验失败都会整批回滚，包括已经写入的阶段和任务，同时释放幂等键，可以用同一个键重试。
+
+服务端不自动重试死锁或锁等待超时：客户端可能已经超时，幂等键才是重试机制。
 
 ## 验证
 
