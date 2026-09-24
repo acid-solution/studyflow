@@ -23,6 +23,11 @@ const (
 	SessionStatusRunning   = "running"
 	SessionStatusFinished  = "finished"
 	SessionStatusDiscarded = "discarded"
+
+	// Where a plan or task came from: a person using the app, or an agent that
+	// imported it over MCP.
+	SourceUser  = "user"
+	SourceAgent = "agent"
 )
 
 type Goal struct {
@@ -47,6 +52,7 @@ type Plan struct {
 	Title           string  `gorm:"type:varchar(160);not null"`
 	Description     string  `gorm:"type:text;not null"`
 	Mode            string  `gorm:"type:varchar(16);not null"`
+	Source          string  `gorm:"type:varchar(16);not null;default:user"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
@@ -93,6 +99,7 @@ type Task struct {
 	Position         uint       `gorm:"not null"`
 	Status           string     `gorm:"type:varchar(16);not null;index"`
 	Version          uint       `gorm:"not null"`
+	Source           string     `gorm:"type:varchar(16);not null;default:user"`
 	CompletedAt      *time.Time
 	CreatedAt        time.Time
 	UpdatedAt        time.Time

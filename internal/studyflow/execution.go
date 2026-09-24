@@ -241,9 +241,10 @@ func validateTaskSchedule(mode string, date *time.Time) error {
 }
 
 // insertTask writes one task row. Same contract as insertMilestone: no lookups,
-// no position allocation, no structure bump.
-func insertTask(tx *gorm.DB, userID, versionID string, input CreateTaskInput, date *time.Time, position uint) (*model.Task, error) {
-	created := model.Task{ID: uuid.NewString(), UserID: userID, PlanVersionID: versionID, MilestoneID: input.MilestoneID, Title: input.Title, Description: input.Description, EstimateMinutes: input.EstimateMinutes, ScheduledDate: date, Position: position, Status: model.TaskStatusTodo, Version: 1}
+// no position allocation, no structure bump. The source records whether a person
+// or an agent put it there.
+func insertTask(tx *gorm.DB, userID, versionID string, input CreateTaskInput, date *time.Time, position uint, source string) (*model.Task, error) {
+	created := model.Task{ID: uuid.NewString(), UserID: userID, PlanVersionID: versionID, MilestoneID: input.MilestoneID, Title: input.Title, Description: input.Description, EstimateMinutes: input.EstimateMinutes, ScheduledDate: date, Position: position, Status: model.TaskStatusTodo, Version: 1, Source: source}
 	if err := tx.Create(&created).Error; err != nil {
 		return nil, err
 	}
@@ -292,7 +293,7 @@ func (s *Service) CreateTask(ctx context.Context, userID, versionID string, inpu
 			}
 			position = max + 1
 		}
-		task, err := insertTask(tx, userID, versionID, input, date, position)
+		task, err := insertTask(tx, userID, versionID, input, date, position, model.SourceUser)
 		if err != nil {
 			return err
 		}

@@ -131,7 +131,7 @@ func (s *Service) ImportPlanTree(ctx context.Context, userID, idempotencyKey str
 	}
 
 	importID := uuid.NewString()
-	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: input.GoalID, Title: input.Title, Description: input.Description, Mode: input.Mode}
+	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: input.GoalID, Title: input.Title, Description: input.Description, Mode: input.Mode, Source: model.SourceAgent}
 	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: parseCanonicalDate(input.StartDate), EndDate: parseCanonicalDate(input.EndDate), StructureRevision: 1}
 	receipt := model.PlanImport{ID: importID, UserID: userID, IdempotencyKey: key, RequestDigest: digest, PlanID: plan.ID, PlanVersionID: version.ID, CreatedAt: s.now().UTC()}
 
@@ -219,7 +219,7 @@ func insertImportedTask(tx *gorm.DB, userID, versionID string, milestoneID *stri
 	if err := validateTaskSchedule(mode, date); err != nil {
 		return err
 	}
-	_, err = insertTask(tx, userID, versionID, input, date, position)
+	_, err = insertTask(tx, userID, versionID, input, date, position, model.SourceAgent)
 	return err
 }
 

@@ -87,6 +87,7 @@ type PlanSummary struct {
 	Title           string  `json:"title"`
 	Description     string  `json:"description"`
 	Mode            string  `json:"mode"`
+	Source          string  `json:"source"`
 	ActiveVersionID *string `json:"active_version_id"`
 	ActiveVersionNo *uint   `json:"active_version_no"`
 	DraftVersionID  *string `json:"draft_version_id"`
@@ -115,6 +116,7 @@ type PlanView struct {
 	Title           string    `json:"title"`
 	Description     string    `json:"description"`
 	Mode            string    `json:"mode"`
+	Source          string    `json:"source"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 
@@ -159,6 +161,7 @@ type TaskView struct {
 	Position        uint       `json:"position"`
 	Status          string     `json:"status"`
 	Version         uint       `json:"version"`
+	Source          string     `json:"source"`
 	CompletedAt     *time.Time `json:"completed_at"`
 	IsOverdue       bool       `json:"is_overdue"`
 }
@@ -322,7 +325,7 @@ func (s *Service) loadGoalTree(ctx context.Context, userID string) ([]*GoalNode,
 	}
 	plansByGoal := map[string][]PlanSummary{}
 	for _, plan := range plans {
-		summary := PlanSummary{ID: plan.ID, GoalID: plan.GoalID, Title: plan.Title, Description: plan.Description, Mode: plan.Mode, ActiveVersionID: plan.ActiveVersionID}
+		summary := PlanSummary{ID: plan.ID, GoalID: plan.GoalID, Title: plan.Title, Description: plan.Description, Mode: plan.Mode, Source: plan.Source, ActiveVersionID: plan.ActiveVersionID}
 		if plan.ActiveVersionID != nil {
 			if version, ok := versionByID[*plan.ActiveVersionID]; ok {
 				number := version.VersionNo
@@ -420,7 +423,7 @@ func (s *Service) CreatePlan(ctx context.Context, userID, goalID string, input C
 	if err != nil {
 		return nil, err
 	}
-	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: goalID, Title: input.Title, Description: input.Description, Mode: input.Mode}
+	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: goalID, Title: input.Title, Description: input.Description, Mode: input.Mode, Source: model.SourceUser}
 	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: startDate, EndDate: endDate, StructureRevision: 1}
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return s.insertPlanWithVersion(ctx, tx, userID, goalID, plan, version)
@@ -471,7 +474,7 @@ func (s *Service) ListPlans(ctx context.Context, userID, goalID, mode string) ([
 	}
 	result := make([]PlanSummary, 0, len(plans))
 	for _, plan := range plans {
-		summary := PlanSummary{ID: plan.ID, GoalID: plan.GoalID, Title: plan.Title, Description: plan.Description, Mode: plan.Mode, ActiveVersionID: plan.ActiveVersionID}
+		summary := PlanSummary{ID: plan.ID, GoalID: plan.GoalID, Title: plan.Title, Description: plan.Description, Mode: plan.Mode, Source: plan.Source, ActiveVersionID: plan.ActiveVersionID}
 		if plan.ActiveVersionID != nil {
 			var version model.PlanVersion
 			if err := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", *plan.ActiveVersionID, userID).First(&version).Error; err == nil {
@@ -502,7 +505,7 @@ func (s *Service) GetPlan(ctx context.Context, userID, planID string) (*PlanDeta
 	if err := s.db.WithContext(ctx).Where("plan_id = ? AND user_id = ?", planID, userID).Order("version_no DESC").Find(&versions).Error; err != nil {
 		return nil, err
 	}
-	detail := &PlanDetail{Plan: PlanView{ID: plan.ID, GoalID: plan.GoalID, ActiveVersionID: plan.ActiveVersionID, Title: plan.Title, Description: plan.Description, Mode: plan.Mode, CreatedAt: plan.CreatedAt}}
+	detail := &PlanDetail{Plan: PlanView{ID: plan.ID, GoalID: plan.GoalID, ActiveVersionID: plan.ActiveVersionID, Title: plan.Title, Description: plan.Description, Mode: plan.Mode, Source: plan.Source, CreatedAt: plan.CreatedAt}}
 	for _, version := range versions {
 		view, err := s.versionView(ctx, userID, version)
 		if err != nil {
@@ -562,7 +565,7 @@ func (s *Service) ClonePlanVersion(ctx context.Context, userID, planID string) (
 				}
 			}
 			sourceID := item.ID
-			copy := model.Task{ID: uuid.NewString(), UserID: userID, PlanVersionID: created.ID, MilestoneID: milestoneID, CopiedFromTaskID: &sourceID, Title: item.Title, Description: item.Description, EstimateMinutes: item.EstimateMinutes, ScheduledDate: item.ScheduledDate, Position: item.Position, Status: model.TaskStatusTodo, Version: 1}
+			copy := model.Task{ID: uuid.NewString(), UserID: userID, PlanVersionID: created.ID, MilestoneID: milestoneID, CopiedFromTaskID: &sourceID, Title: item.Title, Description: item.Description, EstimateMinutes: item.EstimateMinutes, ScheduledDate: item.ScheduledDate, Position: item.Position, Status: model.TaskStatusTodo, Version: 1, Source: item.Source}
 			if err := tx.Create(&copy).Error; err != nil {
 				return err
 			}
@@ -742,7 +745,7 @@ func isDuplicate(err error) bool {
 }
 
 func taskView(task model.Task, planID, planTitle, planMode string, today time.Time) TaskView {
-	item := TaskView{ID: task.ID, PlanID: planID, PlanTitle: planTitle, PlanMode: planMode, PlanVersionID: task.PlanVersionID, MilestoneID: task.MilestoneID, Title: task.Title, Description: task.Description, EstimateMinutes: task.EstimateMinutes, ScheduledDate: formatDatePtr(task.ScheduledDate), Position: task.Position, Status: task.Status, Version: task.Version, CompletedAt: task.CompletedAt}
+	item := TaskView{ID: task.ID, PlanID: planID, PlanTitle: planTitle, PlanMode: planMode, PlanVersionID: task.PlanVersionID, MilestoneID: task.MilestoneID, Title: task.Title, Description: task.Description, EstimateMinutes: task.EstimateMinutes, ScheduledDate: formatDatePtr(task.ScheduledDate), Position: task.Position, Status: task.Status, Version: task.Version, Source: task.Source, CompletedAt: task.CompletedAt}
 	if !today.IsZero() && task.ScheduledDate != nil && task.ScheduledDate.Before(today) && task.Status != model.TaskStatusDone && task.Status != model.TaskStatusCanceled {
 		item.IsOverdue = true
 	}
