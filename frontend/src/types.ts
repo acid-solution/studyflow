@@ -1,5 +1,7 @@
 export type PlanMode = 'calendar' | 'sequence'
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'canceled'
+// Who put a plan or task there: a person using the app, or an agent that imported it.
+export type TaskSource = 'user' | 'agent'
 
 export type PlanSummary = {
   id: string
@@ -7,6 +9,7 @@ export type PlanSummary = {
   title: string
   description: string
   mode: PlanMode
+  source: TaskSource
   active_version_id: string | null
   active_version_no: number | null
   draft_version_id: string | null
@@ -43,6 +46,7 @@ export type Task = {
   position: number
   status: TaskStatus
   version: number
+  source: TaskSource
   completed_at: string | null
   is_overdue: boolean
 }
@@ -60,7 +64,7 @@ export type PlanVersion = {
   unassigned_tasks: Task[]
 }
 export type PlanDetail = {
-  plan: { id: string; goal_id: string; active_version_id: string | null; title: string; description: string; mode: PlanMode; created_at: string }
+  plan: { id: string; goal_id: string; active_version_id: string | null; title: string; description: string; mode: PlanMode; source: TaskSource; created_at: string }
   versions: PlanVersion[]
 }
 
@@ -88,4 +92,24 @@ export type WeeklyReview = {
   reschedule_count: number
   daily: Array<{ date: string; duration_seconds: number }>
   plans: Array<{ plan_id: string; plan_title: string; planned_minutes: number; actual_duration_seconds: number; completed_tasks: number; reschedule_count: number }>
+}
+
+export type ImportTask = { title: string; description?: string; estimate_minutes?: number; scheduled_date?: string | null }
+export type ImportDraft = {
+  goal_id?: string
+  title: string
+  description?: string
+  mode: PlanMode
+  weekly_capacity_minutes?: number
+  start_date?: string | null
+  end_date?: string | null
+  milestones?: Array<{ title: string; outcome?: string; tasks?: ImportTask[] }>
+  tasks?: ImportTask[]
+}
+export type PlanImportResult = {
+  import_id: string
+  replayed: boolean
+  plan_id: string
+  plan_version_id: string
+  plan: PlanDetail
 }

@@ -342,6 +342,27 @@ func TestPlanTreeImportIntegration(t *testing.T) {
 	if len(version.UnassignedTasks) != 1 || version.UnassignedTasks[0].MilestoneID != nil {
 		t.Fatalf("unexpected unassigned tasks: %+v", version.UnassignedTasks)
 	}
+	// An imported plan and everything under it is marked as agent-originated, so
+	// the app can tell it apart from what the user made by hand.
+	if first.Plan.Plan.Source != model.SourceAgent {
+		t.Fatalf("an imported plan should be marked agent, got %q", first.Plan.Plan.Source)
+	}
+	for _, milestone := range version.Milestones {
+		for _, task := range milestone.Tasks {
+			if task.Source != model.SourceAgent {
+				t.Fatalf("an imported task should be marked agent: %+v", task)
+			}
+		}
+	}
+	for _, task := range version.UnassignedTasks {
+		if task.Source != model.SourceAgent {
+			t.Fatalf("an imported unassigned task should be marked agent: %+v", task)
+		}
+	}
+	// The guard plan was created through the ordinary endpoint, so it stays user.
+	if guard.Plan.Source != model.SourceUser {
+		t.Fatalf("a hand-made plan should be marked user, got %q", guard.Plan.Source)
+	}
 	var receipt model.PlanImport
 	if err := db.Where("user_id = ? AND idempotency_key = ?", userID, key).First(&receipt).Error; err != nil {
 		t.Fatal(err)

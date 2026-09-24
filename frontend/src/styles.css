@@ -308,29 +308,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .task-table-row.is-complete { opacity: .55; }
 .task-table-row.is-complete > strong { text-decoration: line-through; }
 
-.imports-page .page-heading .button { align-self: flex-end; }
 .import-card { margin-top: 23px; overflow: hidden; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); }
-.import-source { display: grid; min-height: 68px; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 13px 17px; border-bottom: 1px solid var(--border); background: #f7faff; }
-.source-mark { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 10px; color: #fff; background: var(--primary); font-size: 12px; font-weight: 650; }
-.import-source strong, .import-source div > span { display: block; }
-.import-source strong { font-size: 12px; font-weight: 550; }
-.import-source div > span { margin-top: 4px; color: var(--muted); font-size: 9px; }
-.pending-badge { padding: 5px 8px; border-radius: 7px; color: #9a6b18; background: #fff1cf; font-size: 9px; }
-.import-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 19px 19px 13px; }
-.import-title > div > span { color: var(--muted); font-size: 9px; }
-.import-title h2 { margin: 7px 0 5px; font-size: 20px; font-weight: 560; }
-.import-title p { margin: 0; color: var(--muted); font-size: 10px; }
-.import-summary { display: grid; grid-template-columns: repeat(4, 1fr); margin: 2px 19px 15px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; }
-.import-summary div { min-height: 65px; padding: 12px 15px; border-right: 1px solid var(--border); }
-.import-summary div:last-child { border-right: 0; }
-.import-summary strong, .import-summary span { display: block; }
-.import-summary strong { font-size: 14px; font-weight: 550; }
-.import-summary span { margin-top: 5px; color: var(--muted); font-size: 9px; }
-.import-preview { margin: 0 19px; border: 1px solid var(--border); border-radius: 10px; }
-.import-preview div { display: grid; min-height: 48px; grid-template-columns: 70px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 8px 13px; border-bottom: 1px solid var(--border); }
-.import-preview div:last-child { border-bottom: 0; }
-.import-preview span, .import-preview em { color: var(--muted); font-size: 9px; font-style: normal; }
-.import-preview strong { font-size: 11px; font-weight: 500; }
 .import-warning { display: flex; align-items: center; gap: 8px; margin: 13px 19px 0; padding: 10px 12px; border-radius: 9px; color: #8b641e; background: #fff8e8; font-size: 9px; }
 .import-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 16px 19px 19px; }
 .import-success { display: grid; min-height: 300px; align-content: center; justify-items: center; margin-top: 23px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); text-align: center; }
@@ -514,11 +492,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
   .detail-summary > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
   .detail-aside { grid-template-columns: 1fr; }
   .task-toolbar { grid-template-columns: 1fr; }
-  .import-summary, .review-metrics { grid-template-columns: repeat(2, 1fr); }
-  .import-summary div:nth-child(2), .review-metrics div:nth-child(2) { border-right: 0; }
-  .import-summary div:nth-child(-n+2), .review-metrics div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
-  .import-preview div { grid-template-columns: 60px minmax(0, 1fr); }
-  .import-preview em { grid-column: 2; }
+  .review-metrics { grid-template-columns: repeat(2, 1fr); }
+  .review-metrics div:nth-child(2) { border-right: 0; }
+  .review-metrics div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
   .history-head, .history-row, .plan-review-head, .plan-review-row { min-width: 640px; }
   .import-history, .plan-review { overflow-x: auto; }
   .setting-row { grid-template-columns: 1fr; }
@@ -533,3 +509,24 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
   .date-column strong, .date-column span { display: inline; }
   .date-column span { margin-left: 7px; }
 }
+
+.import-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .7fr); align-items: start; gap: 18px; margin-top: 20px; }
+.import-form { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); }
+.import-form label { display: grid; gap: 6px; }
+.import-form label > span { color: var(--muted); font-size: 11px; }
+.import-form select, .import-form textarea { padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-alt); font-size: 11px; }
+.import-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.6; resize: vertical; }
+.import-actions { display: grid; grid-template-columns: auto auto 1fr auto; gap: 9px; }
+.import-error { margin: 0; padding: 9px 12px; border: 1px solid #f0cdc9; border-radius: 9px; background: var(--danger-soft); color: var(--danger); font-size: 11px; }
+.import-side { display: grid; gap: 14px; }
+.import-side .import-card { margin: 0; padding: 15px 17px; }
+.import-side .import-card h2 { margin: 0 0 10px; font-size: 12px; }
+.import-summary { display: grid; gap: 8px; margin: 0; }
+.import-summary div { display: flex; align-items: baseline; gap: 12px; font-size: 11px; }
+.import-summary dt { flex: 0 0 auto; color: var(--muted); }
+/* The value has to keep the leftover width; without min-width:0 a long Chinese
+   title shrinks to one character per line instead of wrapping. */
+.import-summary dd { flex: 1 1 auto; min-width: 0; margin: 0; font-weight: 550; text-align: right; }
+.import-result { border-color: #cad8f5; background: var(--primary-soft); }
+.import-result .plan-open-button { margin-top: 12px; }
+.source-badge { display: inline-flex; min-height: 21px; align-items: center; padding: 2px 7px; border-radius: 6px; background: #efe8ff; color: #5b3fb0; font-size: 10px; white-space: nowrap; }

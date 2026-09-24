@@ -5,7 +5,7 @@ import {
   ShieldCheck, Target, Timer, X,
 } from 'lucide-react'
 import { Account, APIError, api, login, logout, refreshAccess, register, requestVerification } from './api'
-import type { Dashboard, GoalNode, Milestone, PlanDetail, PlanMode, PlanSummary, PlanVersion, Preferences, Session, Task, WeeklyReview } from './types'
+import type { Dashboard, GoalNode, ImportDraft, Milestone, PlanDetail, PlanImportResult, PlanMode, PlanSummary, PlanVersion, Preferences, Session, Task, TaskSource, WeeklyReview } from './types'
 
 type Page = 'today' | 'goals' | 'plans' | 'plan-detail' | 'tasks' | 'reviews' | 'imports' | 'settings'
 
@@ -86,7 +86,7 @@ function TaskRow({ task, onOpen, onComplete }: { task: Task; onOpen: (task: Task
   const done = task.status === 'done'
   return <div className={done ? 'task-row is-complete' : 'task-row'}>
     <button className="task-check" onClick={() => onComplete(task)} aria-label={done ? '重新打开' : '完成任务'}>{done ? <Check size={15} /> : <Circle size={17} />}</button>
-    <div className="task-copy"><strong>{task.title}</strong><div className="task-meta"><span className="plan-badge tone-blue">{task.plan_title || '学习计划'}</span><span>{task.scheduled_date ? task.scheduled_date : task.plan_mode === 'sequence' ? '按课时推进' : '未安排日期'}</span></div></div>
+    <div className="task-copy"><strong>{task.title}</strong><div className="task-meta"><span className="plan-badge tone-blue">{task.plan_title || '学习计划'}</span><SourceBadge source={task.source} /><span>{task.scheduled_date ? task.scheduled_date : task.plan_mode === 'sequence' ? '按课时推进' : '未安排日期'}</span></div></div>
     <button className="row-action" onClick={() => onOpen(task)} aria-label="查看任务"><ChevronRight size={17} /></button>
   </div>
 }
@@ -160,7 +160,7 @@ function PlansPage({ token, onOpen }: { token: string; onOpen: (id: string) => v
   const create = async (event: FormEvent) => { event.preventDefault(); const value = await api<PlanDetail>(token, `/goals/${goalID}/plans`, { method: 'POST', body: JSON.stringify({ title, mode, weekly_capacity_minutes: capacity }) }); setShowForm(false); await plans.reload(); onOpen(value.plan.id) }
   return <PageFrame eyebrow="学习计划" title="多个计划可以同步进行" description="按日期安排到天，按课时计划依次推进。" action={<button className="button button-primary" onClick={() => setShowForm(true)} disabled={!flat.length}><Plus size={16} />新建计划</button>}>
     {showForm && <form className="inline-editor" onSubmit={create}><div><strong>创建计划草稿</strong><span>激活前可以完整编辑结构</span></div><input required placeholder="计划名称" value={title} onChange={(event) => setTitle(event.target.value)} /><select value={goalID} onChange={(event) => setGoalID(event.target.value)}>{flat.map(({ goal, depth }) => <option key={goal.id} value={goal.id}>{'　'.repeat(depth)}{goal.title}</option>)}</select><select value={mode} onChange={(event) => setMode(event.target.value as PlanMode)}><option value="calendar">按日期</option><option value="sequence">按课时</option></select><input type="number" min="0" value={capacity} onChange={(event) => setCapacity(Number(event.target.value))} aria-label="每周计划分钟数" /><button className="button button-primary">创建</button><button className="button" type="button" onClick={() => setShowForm(false)}>取消</button></form>}
-    {!plans.data ? <LoadingBlock error={plans.error || goals.error} /> : <div className="plan-card-grid">{plans.data.map((plan) => <article className="plan-card" key={plan.id}><div className="plan-card-head"><span className="plan-type">{plan.mode === 'calendar' ? <CalendarDays size={13} /> : <BookOpen size={13} />}{plan.mode === 'calendar' ? '按日期' : '按课时'}</span><span className={plan.active_version_id ? 'status-badge active' : 'status-badge draft'}>{plan.active_version_id ? `V${plan.active_version_no} 进行中` : '草稿'}</span></div><h2>{plan.title}</h2><p className="plan-description">{plan.description || '尚未填写计划说明。'}</p><div className="plan-progress-copy"><span>任务完成</span><strong>{plan.done_tasks} / {plan.total_tasks}</strong></div><div className="progress-track"><span style={{ width: `${plan.total_tasks ? plan.done_tasks / plan.total_tasks * 100 : 0}%` }} /></div>{plan.draft_version_id && <div className="plan-next"><span>待处理</span><strong>存在尚未激活的新版本草稿</strong></div>}<button className="button plan-open-button" onClick={() => onOpen(plan.id)}>查看计划 <ChevronRight size={15} /></button></article>)}</div>}
+    {!plans.data ? <LoadingBlock error={plans.error || goals.error} /> : <div className="plan-card-grid">{plans.data.map((plan) => <article className="plan-card" key={plan.id}><div className="plan-card-head"><span className="plan-type">{plan.mode === 'calendar' ? <CalendarDays size={13} /> : <BookOpen size={13} />}{plan.mode === 'calendar' ? '按日期' : '按课时'}</span><SourceBadge source={plan.source} /><span className={plan.active_version_id ? 'status-badge active' : 'status-badge draft'}>{plan.active_version_id ? `V${plan.active_version_no} 进行中` : '草稿'}</span></div><h2>{plan.title}</h2><p className="plan-description">{plan.description || '尚未填写计划说明。'}</p><div className="plan-progress-copy"><span>任务完成</span><strong>{plan.done_tasks} / {plan.total_tasks}</strong></div><div className="progress-track"><span style={{ width: `${plan.total_tasks ? plan.done_tasks / plan.total_tasks * 100 : 0}%` }} /></div>{plan.draft_version_id && <div className="plan-next"><span>待处理</span><strong>存在尚未激活的新版本草稿</strong></div>}<button className="button plan-open-button" onClick={() => onOpen(plan.id)}>查看计划 <ChevronRight size={15} /></button></article>)}</div>}
   </PageFrame>
 }
 
@@ -218,7 +218,119 @@ function SettingsPage({ token, account, onLogout }: { token: string; account: Ac
   </PageFrame>
 }
 
-function ImportsPage() { return <PageFrame eyebrow="后续功能" title="计划导入与 MCP" description="本轮先完成计划执行闭环，JobPilot 导入将在后续接入。"><section className="import-card locked-feature"><RefreshCcw size={28} /><h2>功能暂未开放</h2><p>后续会在用户确认后，通过 MCP 将 JobPilot 生成的计划草稿导入这里。</p></section></PageFrame> }
+const sampleDraft = `{
+  "title": "示例：三周复习计划",
+  "description": "由 JobPilot 生成、用户确认后导入。",
+  "mode": "calendar",
+  "weekly_capacity_minutes": 300,
+  "milestones": [
+    {
+      "title": "第一阶段 · 基础",
+      "outcome": "把模板过一遍",
+      "tasks": [
+        { "title": "任务一", "estimate_minutes": 45, "scheduled_date": "2026-10-01" },
+        { "title": "任务二", "estimate_minutes": 30 }
+      ]
+    },
+    { "title": "第二阶段 · 进阶", "tasks": [{ "title": "任务三", "estimate_minutes": 60 }] }
+  ],
+  "tasks": [{ "title": "未分阶段任务", "estimate_minutes": 20 }]
+}`
+
+function SourceBadge({ source }: { source: TaskSource }) {
+  if (source !== 'agent') return null
+  return <span className="source-badge" title="由 Agent 通过 MCP 导入">Agent 导入</span>
+}
+
+function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: string) => void }) {
+  const goals = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token])
+  const [goalID, setGoalID] = useState('')
+  const [draft, setDraft] = useState('')
+  const [key, setKey] = useState('')
+  const [result, setResult] = useState<PlanImportResult | null>(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const all = flattenGoals(goals.data ?? [])
+  useEffect(() => { if (!goalID && all[0]) setGoalID(all[0].goal.id) }, [goalID, all])
+
+  // 改草稿就作废幂等键：同一份草稿再点一次确认是重放，改了内容才算新的一次导入。
+  const editDraft = (value: string) => { setDraft(value); setKey(''); setResult(null); setError('') }
+
+  let preview: { title: string; mode: string; milestones: number; tasks: number } | null = null
+  let parseError = ''
+  if (draft.trim()) {
+    try {
+      const value = JSON.parse(draft) as ImportDraft
+      const milestones = Array.isArray(value.milestones) ? value.milestones : []
+      const loose = Array.isArray(value.tasks) ? value.tasks : []
+      preview = {
+        title: (value.title ?? '').trim() || '（未命名）',
+        mode: value.mode === 'sequence' ? '按课时' : '按日期',
+        milestones: milestones.length,
+        tasks: milestones.reduce((sum, item) => sum + (Array.isArray(item?.tasks) ? item.tasks.length : 0), 0) + loose.length,
+      }
+    } catch { parseError = '草稿不是合法的 JSON。' }
+  }
+
+  const confirm = async () => {
+    if (!preview) return
+    setBusy(true); setError('')
+    try {
+      const body = JSON.parse(draft) as ImportDraft
+      const idempotencyKey = key || `ui-${crypto.randomUUID()}`
+      const value = await api<PlanImportResult>(token, '/plan-imports', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify({ ...body, goal_id: goalID }),
+      })
+      setKey(idempotencyKey)
+      setResult(value)
+    } catch (reason) { setError(messageOf(reason)) } finally { setBusy(false) }
+  }
+
+  return <PageFrame eyebrow="计划导入" title="确认之后才会写进去" description="粘贴 JobPilot 生成的学习路线草稿，核对无误再导入。导入会落在草稿版本上，激活后才进入执行。">
+    <section className="import-layout">
+      <div className="import-form">
+        <label><span>导入到哪个目标</span>
+          <select value={goalID} onChange={(event) => setGoalID(event.target.value)} disabled={!all.length}>
+            {all.map(({ goal, depth }) => <option key={goal.id} value={goal.id}>{'　'.repeat(depth)}{goal.title}</option>)}
+          </select>
+        </label>
+        <label><span>路线草稿（JSON）</span>
+          <textarea value={draft} onChange={(event) => editDraft(event.target.value)} rows={16} spellCheck={false} placeholder='{"title": "…", "mode": "calendar", "milestones": []}' />
+        </label>
+        <div className="import-actions">
+          <button className="button" type="button" onClick={() => editDraft(sampleDraft)}>填入示例</button>
+          <button className="button" type="button" onClick={() => editDraft('')} disabled={!draft}>清空</button>
+          <span />
+          <button className="button button-primary" onClick={confirm} disabled={!preview || busy || !goalID}>{busy ? '导入中…' : key ? '再次确认（会重放）' : '确认导入'}</button>
+        </div>
+        {parseError && <p className="import-error">{parseError}</p>}
+        {error && <p className="import-error">{error}</p>}
+      </div>
+      <aside className="import-side">
+        <section className="import-card">
+          <h2>将创建的内容</h2>
+          {!preview ? <p className="muted-copy">粘贴草稿后这里会显示摘要。</p> : <dl className="import-summary">
+            <div><dt>计划</dt><dd>{preview.title}</dd></div>
+            <div><dt>模式</dt><dd>{preview.mode}</dd></div>
+            <div><dt>阶段</dt><dd>{preview.milestones}</dd></div>
+            <div><dt>任务</dt><dd>{preview.tasks}</dd></div>
+          </dl>}
+        </section>
+        <section className="import-card">
+          <h2>幂等</h2>
+          <p className="muted-copy">{key ? '这份草稿已经带着一个幂等键。再点一次确认只会返回上次的结果，不会重复建；改动草稿会换一个新键。' : '第一次确认时会生成幂等键，所以超时或重复点击都不会建出两份。'}</p>
+        </section>
+        {result && <section className="import-card import-result">
+          <h2>{result.replayed ? '已存在，返回上次结果' : '导入成功'}</h2>
+          <p className="muted-copy">{result.replayed ? '这次没有新建任何数据。' : `版本状态 ${result.plan.versions[0]?.status ?? 'draft'}，激活后进入执行。`}</p>
+          <button className="button plan-open-button" onClick={() => onOpenPlan(result.plan_id)}>打开计划 <ChevronRight size={15} /></button>
+        </section>}
+      </aside>
+    </section>
+  </PageFrame>
+}
 
 function TaskDrawer({ token, task, running, onClose, onChanged }: { token: string; task: Task; running: Session | null; onClose: () => void; onChanged: () => void }) {
   const history = useLoad(() => api<Session[]>(token, `/tasks/${task.id}/sessions`), [token, task.id])
@@ -256,6 +368,6 @@ export default function App() {
   const signOut = async () => { await logout(); setToken(''); setAccount(null) }
   if (booting) return <main className="auth-shell"><div className="auth-card"><strong>正在恢复登录状态…</strong></div></main>
   if (!token || !account) return <AuthPage onAuthenticated={accept} />
-  const title = page === 'today' ? ['今天', new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })] : page === 'goals' ? ['目标', '递归拆解长期目标'] : page === 'plans' ? ['学习计划', '多个计划同步推进'] : page === 'plan-detail' ? ['计划详情', '版本、阶段与任务'] : page === 'tasks' ? ['全部任务', '查询所有生效计划'] : page === 'reviews' ? ['学习复盘', '本周执行情况'] : page === 'imports' ? ['计划导入', '后续功能'] : ['设置', '账号与计划偏好']
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><strong>StudyFlow</strong></div><nav className="navigation">{nav.map((item) => { const Icon = item.icon; return <button key={item.id} className={page === item.id || (page === 'plan-detail' && item.id === 'plans') ? 'nav-button is-current' : 'nav-button'} onClick={() => { setPage(item.id); setNotice('') }}><Icon size={18} /><span>{item.label}</span></button> })}</nav><div className="sidebar-footer"><span className="user-avatar">{account.identities[0]?.value.slice(0, 1).toUpperCase() ?? 'U'}</span><div><strong>{account.identities[0]?.value ?? '已登录用户'}</strong><span>个人空间</span></div><ChevronDown size={16} /></div></aside><main className="main-area"><header className="topbar"><div><span>{title[0]}</span><strong>{title[1]}</strong></div></header>{notice && <div className="notice"><span>{notice}</span><button onClick={() => setNotice('')}>×</button></div>}{page === 'today' && <TodayPage token={token} onOpen={openTask} />}{page === 'goals' && <GoalsPage token={token} onOpenPlan={openPlan} />}{page === 'plans' && <PlansPage token={token} onOpen={openPlan} />}{page === 'plan-detail' && planID && <PlanDetailPage token={token} planID={planID} onOpenTask={openTask} />}{page === 'tasks' && <TasksPage token={token} onOpen={openTask} />}{page === 'reviews' && <ReviewPage token={token} />}{page === 'settings' && <SettingsPage token={token} account={account} onLogout={signOut} />}{page === 'imports' && <ImportsPage />}</main>{selectedTask && <TaskDrawer token={token} task={selectedTask} running={running} onClose={() => setSelectedTask(null)} onChanged={changed} />}</div>
+  const title = page === 'today' ? ['今天', new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })] : page === 'goals' ? ['目标', '递归拆解长期目标'] : page === 'plans' ? ['学习计划', '多个计划同步推进'] : page === 'plan-detail' ? ['计划详情', '版本、阶段与任务'] : page === 'tasks' ? ['全部任务', '查询所有生效计划'] : page === 'reviews' ? ['学习复盘', '本周执行情况'] : page === 'imports' ? ['计划导入', '确认后写入'] : ['设置', '账号与计划偏好']
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><strong>StudyFlow</strong></div><nav className="navigation">{nav.map((item) => { const Icon = item.icon; return <button key={item.id} className={page === item.id || (page === 'plan-detail' && item.id === 'plans') ? 'nav-button is-current' : 'nav-button'} onClick={() => { setPage(item.id); setNotice('') }}><Icon size={18} /><span>{item.label}</span></button> })}</nav><div className="sidebar-footer"><span className="user-avatar">{account.identities[0]?.value.slice(0, 1).toUpperCase() ?? 'U'}</span><div><strong>{account.identities[0]?.value ?? '已登录用户'}</strong><span>个人空间</span></div><ChevronDown size={16} /></div></aside><main className="main-area"><header className="topbar"><div><span>{title[0]}</span><strong>{title[1]}</strong></div></header>{notice && <div className="notice"><span>{notice}</span><button onClick={() => setNotice('')}>×</button></div>}{page === 'today' && <TodayPage token={token} onOpen={openTask} />}{page === 'goals' && <GoalsPage token={token} onOpenPlan={openPlan} />}{page === 'plans' && <PlansPage token={token} onOpen={openPlan} />}{page === 'plan-detail' && planID && <PlanDetailPage token={token} planID={planID} onOpenTask={openTask} />}{page === 'tasks' && <TasksPage token={token} onOpen={openTask} />}{page === 'reviews' && <ReviewPage token={token} />}{page === 'settings' && <SettingsPage token={token} account={account} onLogout={signOut} />}{page === 'imports' && <ImportsPage token={token} onOpenPlan={openPlan} />}</main>{selectedTask && <TaskDrawer token={token} task={selectedTask} running={running} onClose={() => setSelectedTask(null)} onChanged={changed} />}</div>
 }
