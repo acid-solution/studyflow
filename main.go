@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -69,7 +70,7 @@ func main() {
 			c.File(frontendIndex)
 		})
 	}
-	if err := router.Run(":" + cfg.Port); err != nil {
+	if err := router.Run(net.JoinHostPort(cfg.AppHost, cfg.Port)); err != nil {
 		log.Fatal(err)
 	}
 }

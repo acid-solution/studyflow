@@ -20,6 +20,13 @@ type Config struct {
 	FrontendURL   string
 	JWKSCacheTTL  time.Duration
 
+	// AppHost is the interface the HTTP server listens on. It defaults to loopback
+	// so a local run is neither reachable from the LAN nor asked for inbound
+	// firewall permission — on Windows, listening on all interfaces makes the OS
+	// pop an "allow this app?" dialog for every new binary path. Containers have
+	// to bind 0.0.0.0, so compose sets it explicitly.
+	AppHost string
+
 	// Caching is off unless CACHE_ENABLED is set. The service falls back to MySQL
 	// whenever Redis is unreachable, so this only decides whether it is tried.
 	CacheEnabled  bool
@@ -40,6 +47,8 @@ func Load() (Config, error) {
 		AuthAudience:  valueOrDefault("AUTH_AUDIENCE", "studyflow"),
 		FrontendURL:   valueOrDefault("FRONTEND_URL", "http://127.0.0.1:5174"),
 		JWKSCacheTTL:  10 * time.Minute,
+
+		AppHost: valueOrDefault("APP_HOST", "127.0.0.1"),
 
 		CacheEnabled:  strings.EqualFold(valueOrDefault("CACHE_ENABLED", "false"), "true"),
 		RedisAddr:     valueOrDefault("REDIS_ADDR", "127.0.0.1:6379"),

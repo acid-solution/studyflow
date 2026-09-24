@@ -44,6 +44,9 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8081"
+      # A container has to accept connections from outside itself, so it binds all
+      # interfaces. Local runs default to loopback and never need a firewall rule.
+      APP_HOST: 0.0.0.0
       MYSQL_DSN: "${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=True&loc=UTC"
       MIGRATIONS_DIR: migrations
       AUTH_JWKS_URL: ${AUTH_JWKS_URL:-http://host.docker.internal:18082/.well-known/jwks.json}
