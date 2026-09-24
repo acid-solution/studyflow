@@ -175,6 +175,25 @@ docker compose --env-file .env.compose up --build -d
 
 服务端不自动重试死锁或锁等待超时：客户端可能已经超时，幂等键才是重试机制。
 
+## MCP 工具
+
+`POST /mcp` 暴露三个 MCP 工具，走 Streamable HTTP，供 JobPilot 这类 Agent 调用。它和 REST API 挂在同一个进程、同一个端口上，并且调用**同一套应用服务**——校验、事务边界和乐观锁都只有一份实现，不会出现两套业务规则。
+
+鉴权与 REST API 完全一致：同一个 `Authorization: Bearer <shared-auth access token>`，同一套 RS256/JWKS 校验，audience 仍然是 `studyflow`。所以签发给 `jobpilot` 的令牌同样调不动这些工具。
+
+| 工具 | 用途 |
+| --- | --- |
+| `import_plan_tree` | 一次事务导入计划树，参数与 `/api/v1/plan-imports` 相同，另加一个调用方生成的 `idempotency_key` |
+| `query_progress` | 查询生效计划的完成进度和任务列表，任务带上乐观锁版本号 |
+| `reschedule_task` | 修改或取消某个任务的计划日期，必须回传版本号 |
+
+两个设计点：
+
+- **幂等键是工具参数，不是 HTTP 头。** 调用方是 Agent，它自己生成并在重试时复用这个键；头属于传输层，工具契约不该依赖它。
+- **改期保留乐观锁。** `version` 必填，不在 MCP 层偷偷"读最新版再写"——那样并发改期会静默丢更新，而静默丢更新比报错难查得多。
+
+会话是无状态的（`Stateless`）：每个请求各带自己的令牌，这些工具也不会反向调用客户端，因此没有会话劫持面。
+
 ## 验证
 
 ```powershell
