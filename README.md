@@ -194,6 +194,41 @@ docker compose --env-file .env.compose up --build -d
 
 会话是无状态的（`Stateless`）：每个请求各带自己的令牌，这些工具也不会反向调用客户端，因此没有会话劫持面。
 
+## 读缓存
+
+`GET /goals/tree` 读得最频繁——目标页每次打开要读，MCP 的 `query_progress` 每次调用也要读——而它要跑四次查询再拼树，还要递归算一遍 `ready_to_complete`。这一条走 Redis。
+
+**失效按代数做，不是删 key。** 每个用户的当前代数会进 key：
+
+```text
+sf:v1:gen:<user_id>              ← 任何写操作 INCR 一次
+sf:v1:goaltree:<user_id>:<gen>   ← 值：目标树 JSON
+```
+
+会改动目标树的写路径有十七处（目标、计划、版本、阶段、任务、计时、导入）。逐个删 key 就是十七次漏掉的机会，而且 `dashboard` 那类 key 还带日期，删之前得先算出是哪天。改成代数之后，失效只有一处，旧 key 自然不可达，靠 TTL 回收。
+
+**缓存挂了不影响业务。** 所有 Redis 操作都是 fail-open：连不上、超时或解码失败一律当成未命中，直接回源 MySQL。`CACHE_ENABLED=false` 就是纯 MySQL 版本，启动时 ping 不通也会自动退回这个模式。每次操作还有 200ms 超时，避免卡住的 Redis 拖慢请求。
+
+TTL 默认 30s，带 ±10% 抖动防止同一批 key 同时过期把压力打回数据库。
+
+**不放 Redis 的东西**（边界比用法更能说明问题）：
+
+- **幂等回执**（`plan_imports`）留在 MySQL。幂等保证要持久，放 Redis 会因为过期或重启丢失，正好破坏它要保证的东西。
+- **单计时器约束**（`uk_sessions_one_running`）留在 MySQL 唯一键。这是不变量不是锁，换成 Redis 分布式锁只会弱化它。
+- **任务和计划数据本身**不缓存，只在聚合读那一层缓存。
+
+配置：
+
+```env
+CACHE_ENABLED=true
+REDIS_ADDR=127.0.0.1:6379
+REDIS_PASSWORD=
+REDIS_DB=0
+CACHE_TTL=30s
+```
+
+compose 里的 redis 故意关掉了持久化（`--save "" --appendonly no`）：它是纯缓存，重启后全部回源即可；而代数计数器和它保护的数据在同一个实例里，所以重启不可能让旧数据复活。
+
 ## 验证
 
 ```powershell
