@@ -31,6 +31,9 @@ const (
 	importMaxTaskTitle      = 255
 	importMaxText           = 2000
 	importMaxMinutes        = 100000
+	// importHistoryLimit caps the audit list; the newest entries are the ones that
+	// matter and this keeps the response bounded without pagination.
+	importHistoryLimit = 50
 )
 
 // errImportReplay reports that the idempotency key was already claimed. It is
@@ -76,6 +79,99 @@ type ImportPlanTreeResult struct {
 	PlanID        string      `json:"plan_id"`
 	PlanVersionID string      `json:"plan_version_id"`
 	Plan          *PlanDetail `json:"plan"`
+}
+
+// PlanImportView is one row of the import history.
+type PlanImportView struct {
+	ImportID       string    `json:"import_id"`
+	IdempotencyKey string    `json:"idempotency_key"`
+	PlanID         string    `json:"plan_id"`
+	PlanTitle      string    `json:"plan_title"`
+	PlanVersionID  string    `json:"plan_version_id"`
+	Milestones     int       `json:"milestones"`
+	Tasks          int       `json:"tasks"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// ListPlanImports returns the caller's import history, newest first.
+//
+// This is the audit trail for everything that arrived from outside the app. It
+// can rely on the receipts alone: a receipt is written in the same transaction
+// as the tree it describes, so a row exists exactly when an import actually
+// created something. Failed and replayed requests leave no row, which is what
+// makes "no row" mean "nothing was created".
+//
+// The counts are read from the version as it stands now, so they show the size
+// the plan has reached rather than a frozen snapshot of the import.
+func (s *Service) ListPlanImports(ctx context.Context, userID string) ([]PlanImportView, error) {
+	var receipts []model.PlanImport
+	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at DESC, id DESC").Limit(importHistoryLimit).Find(&receipts).Error; err != nil {
+		return nil, err
+	}
+	if len(receipts) == 0 {
+		return []PlanImportView{}, nil
+	}
+
+	versionIDs := make([]string, 0, len(receipts))
+	planIDs := make([]string, 0, len(receipts))
+	for _, receipt := range receipts {
+		versionIDs = append(versionIDs, receipt.PlanVersionID)
+		planIDs = append(planIDs, receipt.PlanID)
+	}
+
+	var milestoneRows []importCountRow
+	if err := s.db.WithContext(ctx).Model(&model.Milestone{}).
+		Select("plan_version_id, COUNT(*) AS total").
+		Where("user_id = ? AND plan_version_id IN ?", userID, versionIDs).
+		Group("plan_version_id").Scan(&milestoneRows).Error; err != nil {
+		return nil, err
+	}
+	var taskRows []importCountRow
+	if err := s.db.WithContext(ctx).Model(&model.Task{}).
+		Select("plan_version_id, COUNT(*) AS total").
+		Where("user_id = ? AND plan_version_id IN ?", userID, versionIDs).
+		Group("plan_version_id").Scan(&taskRows).Error; err != nil {
+		return nil, err
+	}
+	var plans []model.Plan
+	if err := s.db.WithContext(ctx).Where("user_id = ? AND id IN ?", userID, planIDs).Find(&plans).Error; err != nil {
+		return nil, err
+	}
+
+	milestones := countByVersion(milestoneRows)
+	tasks := countByVersion(taskRows)
+	titles := make(map[string]string, len(plans))
+	for _, plan := range plans {
+		titles[plan.ID] = plan.Title
+	}
+
+	views := make([]PlanImportView, 0, len(receipts))
+	for _, receipt := range receipts {
+		views = append(views, PlanImportView{
+			ImportID:       receipt.ID,
+			IdempotencyKey: receipt.IdempotencyKey,
+			PlanID:         receipt.PlanID,
+			PlanTitle:      titles[receipt.PlanID],
+			PlanVersionID:  receipt.PlanVersionID,
+			Milestones:     milestones[receipt.PlanVersionID],
+			Tasks:          tasks[receipt.PlanVersionID],
+			CreatedAt:      receipt.CreatedAt,
+		})
+	}
+	return views, nil
+}
+
+type importCountRow struct {
+	PlanVersionID string
+	Total         int
+}
+
+func countByVersion(rows []importCountRow) map[string]int {
+	counts := make(map[string]int, len(rows))
+	for _, row := range rows {
+		counts[row.PlanVersionID] = row.Total
+	}
+	return counts
 }
 
 // The digest covers only the fields that determine the persisted tree, listed

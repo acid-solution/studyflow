@@ -408,6 +408,40 @@ func TestPlanTreeImportIntegration(t *testing.T) {
 		t.Fatal("a semantically identical retry must be reported as a replay")
 	}
 
+	// 3b. The receipts double as the audit trail: exactly one row per import that
+	// actually created something, describing what and when.
+	history, err := service.ListPlanImports(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("want exactly one audit row after one import, got %d", len(history))
+	}
+	entry := history[0]
+	if entry.ImportID != first.ImportID || entry.PlanID != first.PlanID || entry.IdempotencyKey != key {
+		t.Fatalf("audit row does not match the import: %+v", entry)
+	}
+	if entry.PlanTitle != importTitle || entry.Milestones != 2 || entry.Tasks != 4 {
+		t.Fatalf("audit row should describe what was created: %+v", entry)
+	}
+	if !entry.CreatedAt.UTC().Equal(clock) {
+		t.Fatalf("audit row should carry the import time: %s", entry.CreatedAt)
+	}
+	// Neither a replay nor another account's import may show up here.
+	if _, err := service.ImportPlanTree(ctx, userID, key, payload()); err != nil {
+		t.Fatal(err)
+	}
+	if otherHistory, err := service.ListPlanImports(ctx, otherUserID); err != nil {
+		t.Fatal(err)
+	} else if len(otherHistory) != 0 {
+		t.Fatalf("another user's history must stay empty, got %d", len(otherHistory))
+	}
+	if again, err := service.ListPlanImports(ctx, userID); err != nil {
+		t.Fatal(err)
+	} else if len(again) != 1 {
+		t.Fatalf("a replay must not add an audit row, got %d", len(again))
+	}
+
 	// 4. The same key with a different payload is a conflict.
 	different := payload()
 	different.Title = "完全不同的计划"

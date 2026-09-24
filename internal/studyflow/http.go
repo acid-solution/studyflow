@@ -42,6 +42,7 @@ func RegisterRoutes(router *gin.Engine, handler *HTTPHandler, auth gin.HandlerFu
 	api.POST("/plan-versions/:id/milestones", handler.createMilestone)
 	api.POST("/plan-versions/:id/tasks", handler.createTask)
 	api.POST("/plan-imports", handler.importPlanTree)
+	api.GET("/plan-imports", handler.listPlanImports)
 	api.PATCH("/milestones/:id", handler.updateMilestone)
 	api.DELETE("/milestones/:id", handler.deleteMilestone)
 	api.GET("/tasks", handler.listTasks)
@@ -214,6 +215,12 @@ func (h *HTTPHandler) importPlanTree(c *gin.Context) {
 	}
 	userID, _ := identity.UserID(c)
 	value, err := h.service.ImportPlanTree(c, userID, c.GetHeader("Idempotency-Key"), input)
+	write(c, value, err)
+}
+
+func (h *HTTPHandler) listPlanImports(c *gin.Context) {
+	userID, _ := identity.UserID(c)
+	value, err := h.service.ListPlanImports(c, userID)
 	write(c, value, err)
 }
 

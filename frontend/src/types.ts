@@ -113,3 +113,14 @@ export type PlanImportResult = {
   plan_version_id: string
   plan: PlanDetail
 }
+
+export type PlanImportView = {
+  import_id: string
+  idempotency_key: string
+  plan_id: string
+  plan_title: string
+  plan_version_id: string
+  milestones: number
+  tasks: number
+  created_at: string
+}

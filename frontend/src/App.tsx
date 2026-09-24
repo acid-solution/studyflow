@@ -5,7 +5,7 @@ import {
   ShieldCheck, Target, Timer, X,
 } from 'lucide-react'
 import { Account, APIError, api, login, logout, refreshAccess, register, requestVerification } from './api'
-import type { Dashboard, GoalNode, ImportDraft, Milestone, PlanDetail, PlanImportResult, PlanMode, PlanSummary, PlanVersion, Preferences, Session, Task, TaskSource, WeeklyReview } from './types'
+import type { Dashboard, GoalNode, ImportDraft, Milestone, PlanDetail, PlanImportResult, PlanImportView, PlanMode, PlanSummary, PlanVersion, Preferences, Session, Task, TaskSource, WeeklyReview } from './types'
 
 type Page = 'today' | 'goals' | 'plans' | 'plan-detail' | 'tasks' | 'reviews' | 'imports' | 'settings'
 
@@ -244,6 +244,7 @@ function SourceBadge({ source }: { source: TaskSource }) {
 
 function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: string) => void }) {
   const goals = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token])
+  const history = useLoad(() => api<PlanImportView[]>(token, '/plan-imports'), [token])
   const [goalID, setGoalID] = useState('')
   const [draft, setDraft] = useState('')
   const [key, setKey] = useState('')
@@ -285,6 +286,7 @@ function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: st
       })
       setKey(idempotencyKey)
       setResult(value)
+      await history.reload()
     } catch (reason) { setError(messageOf(reason)) } finally { setBusy(false) }
   }
 
@@ -317,6 +319,18 @@ function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: st
             <div><dt>阶段</dt><dd>{preview.milestones}</dd></div>
             <div><dt>任务</dt><dd>{preview.tasks}</dd></div>
           </dl>}
+        </section>
+        <section className="import-card">
+          <h2>导入记录</h2>
+          {!history.data?.length ? <p className="muted-copy">还没有导入过任何计划。</p> : <ul className="import-history">
+            {history.data.map((item) => <li key={item.import_id}>
+              <button type="button" onClick={() => onOpenPlan(item.plan_id)}>
+                <strong>{item.plan_title || '（计划已不存在）'}</strong>
+                <span>{new Date(item.created_at).toLocaleString('zh-CN')}</span>
+                <em>{item.milestones} 阶段 / {item.tasks} 任务</em>
+              </button>
+            </li>)}
+          </ul>}
         </section>
         <section className="import-card">
           <h2>幂等</h2>

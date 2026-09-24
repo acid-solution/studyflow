@@ -134,6 +134,7 @@ docker compose --env-file .env.compose up --build -d
 | POST | `/api/v1/plan-versions/:id/milestones` | 新建阶段 |
 | POST | `/api/v1/plan-versions/:id/tasks` | 新建任务 |
 | POST | `/api/v1/plan-imports` | 批量导入计划树（幂等） |
+| GET | `/api/v1/plan-imports` | 导入记录（跨系统写入的审计） |
 | PATCH/DELETE | `/api/v1/milestones/:id` | 编辑或删除草稿阶段 |
 | GET/PATCH/DELETE | `/api/v1/tasks`、`/api/v1/tasks/:id` | 筛选、编辑或删除草稿任务 |
 | POST | `/api/v1/tasks/:id/complete` | 完成任务 |
@@ -182,6 +183,12 @@ docker compose --env-file .env.compose up --build -d
 计划和任务各自记一份，不是只记计划：导入进来的计划之后可以被手工扩充，那时计划仍是 agent 来源，而用户新加的任务不是。
 
 没有从 `plan_imports` 反查：那张表的回执指向的是被导入的那个**版本**，用户复制出新版本之后这条线索就断了，所以来源落在计划和任务自己身上才稳定。
+
+### 导入记录
+
+`GET /api/v1/plan-imports` 返回当前用户的导入历史，前端「计划导入」页把它显示成「导入记录」。这是跨系统写入的审计：什么时候、用哪个幂等键、建出了哪个计划、现在多大。
+
+它可以只靠回执本身成立，因为回执和它描述的那棵树写在同一个事务里——**有行就说明真的建出了东西**。失败和重放都不留行，所以"没有行"就等于"什么都没建"。计数读的是版本**当前**的大小，不是导入当时的快照，所以计划被继续编辑后这里会跟着变。
 
 ## MCP 工具
 
