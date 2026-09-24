@@ -23,6 +23,9 @@ var (
 	ErrVersionConflict     = errors.New("version conflict")
 	ErrPlanVersionConflict = errors.New("plan version conflict")
 	ErrInvalidState        = errors.New("invalid state")
+	// ErrIdempotencyConflict is a sibling of ErrConflict, not a wrapper: the HTTP
+	// layer switches on errors.Is, so it must stay distinguishable.
+	ErrIdempotencyConflict = errors.New("idempotency key conflict")
 )
 
 type Service struct {
@@ -345,34 +348,51 @@ func (s *Service) GoalTree(ctx context.Context, userID string) ([]*GoalNode, err
 	return roots, nil
 }
 
-func (s *Service) CreatePlan(ctx context.Context, userID, goalID string, input CreatePlanInput) (*PlanDetail, error) {
+// normalizePlanInput trims the free-text fields, validates the mode and the date
+// range, and parses the optional start and end dates.
+func normalizePlanInput(input CreatePlanInput) (CreatePlanInput, *time.Time, *time.Time, error) {
 	input.Title = strings.TrimSpace(input.Title)
+	input.Description = strings.TrimSpace(input.Description)
 	if input.Title == "" || (input.Mode != model.PlanModeCalendar && input.Mode != model.PlanModeSequence) {
-		return nil, ErrValidation
+		return input, nil, nil, ErrValidation
 	}
 	startDate, err := parseOptionalDate(input.StartDate)
 	if err != nil {
-		return nil, err
+		return input, nil, nil, err
 	}
 	endDate, err := parseOptionalDate(input.EndDate)
 	if err != nil {
-		return nil, err
+		return input, nil, nil, err
 	}
 	if startDate != nil && endDate != nil && endDate.Before(*startDate) {
-		return nil, ErrValidation
+		return input, nil, nil, ErrValidation
 	}
-	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: goalID, Title: input.Title, Description: strings.TrimSpace(input.Description), Mode: input.Mode}
-	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: startDate, EndDate: endDate, StructureRevision: 1}
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if _, err := s.getGoal(ctx, tx, userID, goalID, false); err != nil {
-			return err
-		}
-		if err := tx.Create(&plan).Error; err != nil {
-			return err
-		}
-		return tx.Create(&version).Error
-	})
+	return input, startDate, endDate, nil
+}
+
+// insertPlanWithVersion writes a plan together with its first draft version. It
+// performs no version bookkeeping, so a caller-owned transaction can use it to
+// build a whole plan tree without nesting transactions.
+func (s *Service) insertPlanWithVersion(ctx context.Context, tx *gorm.DB, userID, goalID string, plan model.Plan, version model.PlanVersion) error {
+	if _, err := s.getGoal(ctx, tx, userID, goalID, false); err != nil {
+		return err
+	}
+	if err := tx.Create(&plan).Error; err != nil {
+		return err
+	}
+	return tx.Create(&version).Error
+}
+
+func (s *Service) CreatePlan(ctx context.Context, userID, goalID string, input CreatePlanInput) (*PlanDetail, error) {
+	input, startDate, endDate, err := normalizePlanInput(input)
 	if err != nil {
+		return nil, err
+	}
+	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: goalID, Title: input.Title, Description: input.Description, Mode: input.Mode}
+	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: startDate, EndDate: endDate, StructureRevision: 1}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return s.insertPlanWithVersion(ctx, tx, userID, goalID, plan, version)
+	}); err != nil {
 		return nil, mapNotFound(err)
 	}
 	return s.GetPlan(ctx, userID, plan.ID)

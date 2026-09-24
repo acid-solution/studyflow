@@ -71,13 +71,37 @@ type FinishSessionInput struct {
 	Note string `json:"note"`
 }
 
-func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string, input CreateMilestoneInput) (*MilestoneView, error) {
-	title := strings.TrimSpace(input.Title)
-	if title == "" {
-		return nil, ErrValidation
+// normalizeMilestoneInput trims the free-text fields and rejects an empty title.
+func normalizeMilestoneInput(input CreateMilestoneInput) (CreateMilestoneInput, error) {
+	input.Title = strings.TrimSpace(input.Title)
+	input.Outcome = strings.TrimSpace(input.Outcome)
+	if input.Title == "" {
+		return input, ErrValidation
 	}
-	var created model.Milestone
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return input, nil
+}
+
+// insertMilestone writes one milestone row. It performs no lookups, no position
+// allocation and no structure bump, so a caller-owned transaction can use it to
+// build a whole plan tree without nesting transactions.
+func insertMilestone(tx *gorm.DB, userID, versionID string, input CreateMilestoneInput, position uint) (*model.Milestone, error) {
+	created := model.Milestone{ID: uuid.NewString(), UserID: userID, PlanVersionID: versionID, Title: input.Title, Outcome: input.Outcome, Position: position}
+	if err := tx.Create(&created).Error; err != nil {
+		if isDuplicate(err) {
+			return nil, ErrConflict
+		}
+		return nil, err
+	}
+	return &created, nil
+}
+
+func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string, input CreateMilestoneInput) (*MilestoneView, error) {
+	input, err := normalizeMilestoneInput(input)
+	if err != nil {
+		return nil, err
+	}
+	var created *model.Milestone
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		version, _, err := s.versionAndPlan(ctx, tx, userID, versionID, true)
 		if err != nil {
 			return err
@@ -93,13 +117,11 @@ func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string,
 			}
 			position = max + 1
 		}
-		created = model.Milestone{ID: uuid.NewString(), UserID: userID, PlanVersionID: versionID, Title: title, Outcome: strings.TrimSpace(input.Outcome), Position: position}
-		if err := tx.Create(&created).Error; err != nil {
-			if isDuplicate(err) {
-				return ErrConflict
-			}
+		milestone, err := insertMilestone(tx, userID, versionID, input, position)
+		if err != nil {
 			return err
 		}
+		created = milestone
 		return bumpStructure(tx, userID, versionID)
 	})
 	if err != nil {
@@ -188,16 +210,46 @@ func (s *Service) DeleteMilestone(ctx context.Context, userID, milestoneID strin
 	})
 }
 
-func (s *Service) CreateTask(ctx context.Context, userID, versionID string, input CreateTaskInput) (*TaskView, error) {
-	title := strings.TrimSpace(input.Title)
-	if title == "" {
-		return nil, ErrValidation
+// normalizeTaskInput trims the free-text fields, rejects an empty title and
+// parses the optional scheduled date.
+func normalizeTaskInput(input CreateTaskInput) (CreateTaskInput, *time.Time, error) {
+	input.Title = strings.TrimSpace(input.Title)
+	input.Description = strings.TrimSpace(input.Description)
+	if input.Title == "" {
+		return input, nil, ErrValidation
 	}
 	date, err := parseOptionalDate(input.ScheduledDate)
 	if err != nil {
+		return input, nil, err
+	}
+	return input, date, nil
+}
+
+// validateTaskSchedule enforces the rule that a sequence plan advances lesson by
+// lesson and therefore cannot carry a scheduled date.
+func validateTaskSchedule(mode string, date *time.Time) error {
+	if mode == model.PlanModeSequence && date != nil {
+		return fmt.Errorf("%w: sequence plan cannot schedule a date", ErrValidation)
+	}
+	return nil
+}
+
+// insertTask writes one task row. Same contract as insertMilestone: no lookups,
+// no position allocation, no structure bump.
+func insertTask(tx *gorm.DB, userID, versionID string, input CreateTaskInput, date *time.Time, position uint) (*model.Task, error) {
+	created := model.Task{ID: uuid.NewString(), UserID: userID, PlanVersionID: versionID, MilestoneID: input.MilestoneID, Title: input.Title, Description: input.Description, EstimateMinutes: input.EstimateMinutes, ScheduledDate: date, Position: position, Status: model.TaskStatusTodo, Version: 1}
+	if err := tx.Create(&created).Error; err != nil {
 		return nil, err
 	}
-	var created model.Task
+	return &created, nil
+}
+
+func (s *Service) CreateTask(ctx context.Context, userID, versionID string, input CreateTaskInput) (*TaskView, error) {
+	input, date, err := normalizeTaskInput(input)
+	if err != nil {
+		return nil, err
+	}
+	var created *model.Task
 	var plan model.Plan
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		version, foundPlan, err := s.versionAndPlan(ctx, tx, userID, versionID, true)
@@ -208,8 +260,8 @@ func (s *Service) CreateTask(ctx context.Context, userID, versionID string, inpu
 		if version.Status != model.PlanVersionDraft && version.Status != model.PlanVersionActive {
 			return ErrInvalidState
 		}
-		if plan.Mode == model.PlanModeSequence && date != nil {
-			return fmt.Errorf("%w: sequence plan cannot schedule a date", ErrValidation)
+		if err := validateTaskSchedule(plan.Mode, date); err != nil {
+			return err
 		}
 		if input.MilestoneID != nil {
 			var count int64
@@ -234,16 +286,17 @@ func (s *Service) CreateTask(ctx context.Context, userID, versionID string, inpu
 			}
 			position = max + 1
 		}
-		created = model.Task{ID: uuid.NewString(), UserID: userID, PlanVersionID: versionID, MilestoneID: input.MilestoneID, Title: title, Description: strings.TrimSpace(input.Description), EstimateMinutes: input.EstimateMinutes, ScheduledDate: date, Position: position, Status: model.TaskStatusTodo, Version: 1}
-		if err := tx.Create(&created).Error; err != nil {
+		task, err := insertTask(tx, userID, versionID, input, date, position)
+		if err != nil {
 			return err
 		}
+		created = task
 		return bumpStructure(tx, userID, versionID)
 	})
 	if err != nil {
 		return nil, err
 	}
-	view := taskView(created, plan.ID, plan.Title, plan.Mode, time.Time{})
+	view := taskView(*created, plan.ID, plan.Title, plan.Mode, time.Time{})
 	return &view, nil
 }
 
