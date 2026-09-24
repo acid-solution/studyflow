@@ -29,11 +29,24 @@ var (
 )
 
 type Service struct {
-	db  *gorm.DB
-	now func() time.Time
+	db    *gorm.DB
+	now   func() time.Time
+	cache Cache
 }
 
-func NewService(db *gorm.DB) *Service { return &Service{db: db, now: time.Now} }
+// NewService builds a service with caching switched off.
+func NewService(db *gorm.DB) *Service {
+	return &Service{db: db, now: time.Now, cache: noopCache{}}
+}
+
+// NewServiceWithCache builds a service that reads its aggregate queries through
+// the given cache. Passing nil is the same as NewService.
+func NewServiceWithCache(db *gorm.DB, cache Cache) *Service {
+	if cache == nil {
+		return NewService(db)
+	}
+	return &Service{db: db, now: time.Now, cache: cache}
+}
 
 type CreateGoalInput struct {
 	ParentGoalID    *string `json:"parent_goal_id"`
@@ -172,6 +185,7 @@ func (s *Service) CreateGoal(ctx context.Context, userID string, input CreateGoa
 	if err := s.db.WithContext(ctx).Create(&goal).Error; err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	node := goalNode(goal)
 	return &node, nil
 }
@@ -232,6 +246,7 @@ func (s *Service) UpdateGoal(ctx context.Context, userID, goalID string, input U
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
+	s.invalidate(ctx, userID)
 	node := goalNode(updated)
 	return &node, nil
 }
@@ -248,10 +263,27 @@ func (s *Service) SetGoalStatus(ctx context.Context, userID, goalID, status stri
 	if result.RowsAffected != 1 {
 		return ErrNotFound
 	}
+	s.invalidate(ctx, userID)
 	return nil
 }
 
+// GoalTree returns the caller's goal tree, reading through the cache.
 func (s *Service) GoalTree(ctx context.Context, userID string) ([]*GoalNode, error) {
+	key := goalTreeKey(userID, s.cache.Generation(ctx, userID))
+	var cached []*GoalNode
+	if s.cache.Read(ctx, key, &cached) {
+		return cached, nil
+	}
+	roots, err := s.loadGoalTree(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	s.cache.Write(ctx, key, roots)
+	return roots, nil
+}
+
+// loadGoalTree reads the tree straight from MySQL.
+func (s *Service) loadGoalTree(ctx context.Context, userID string) ([]*GoalNode, error) {
 	var goals []model.Goal
 	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at, id").Find(&goals).Error; err != nil {
 		return nil, err
@@ -395,6 +427,7 @@ func (s *Service) CreatePlan(ctx context.Context, userID, goalID string, input C
 	}); err != nil {
 		return nil, mapNotFound(err)
 	}
+	s.invalidate(ctx, userID)
 	return s.GetPlan(ctx, userID, plan.ID)
 }
 
@@ -420,6 +453,7 @@ func (s *Service) UpdatePlan(ctx context.Context, userID, planID string, input U
 	if result.RowsAffected != 1 {
 		return nil, ErrNotFound
 	}
+	s.invalidate(ctx, userID)
 	return s.GetPlan(ctx, userID, planID)
 }
 
@@ -538,6 +572,7 @@ func (s *Service) ClonePlanVersion(ctx context.Context, userID, planID string) (
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	view, err := s.versionView(ctx, userID, created)
 	return &view, err
 }
@@ -589,6 +624,7 @@ func (s *Service) ActivatePlanVersion(ctx context.Context, userID, versionID str
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	return s.GetPlan(ctx, userID, planID)
 }
 

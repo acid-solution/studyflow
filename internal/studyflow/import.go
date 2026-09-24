@@ -179,6 +179,7 @@ func (s *Service) ImportPlanTree(ctx context.Context, userID, idempotencyKey str
 		}
 		return nil, mapNotFound(err)
 	}
+	s.invalidate(ctx, userID)
 	detail, err := s.GetPlan(ctx, userID, plan.ID)
 	if err != nil {
 		return nil, err

@@ -127,6 +127,7 @@ func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string,
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	return &MilestoneView{ID: created.ID, Title: created.Title, Outcome: created.Outcome, Position: created.Position, Tasks: []TaskView{}}, nil
 }
 
@@ -176,6 +177,7 @@ func (s *Service) UpdateMilestone(ctx context.Context, userID, milestoneID strin
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	var tasks []model.Task
 	if err := s.db.WithContext(ctx).Where("milestone_id = ? AND user_id = ?", item.ID, userID).Order("position").Find(&tasks).Error; err != nil {
 		return nil, err
@@ -188,7 +190,7 @@ func (s *Service) UpdateMilestone(ctx context.Context, userID, milestoneID strin
 }
 
 func (s *Service) DeleteMilestone(ctx context.Context, userID, milestoneID string) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var item model.Milestone
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", milestoneID, userID).First(&item).Error; err != nil {
 			return mapNotFound(err)
@@ -207,7 +209,11 @@ func (s *Service) DeleteMilestone(ctx context.Context, userID, milestoneID strin
 			return err
 		}
 		return bumpStructure(tx, userID, item.PlanVersionID)
-	})
+	}); err != nil {
+		return err
+	}
+	s.invalidate(ctx, userID)
+	return nil
 }
 
 // normalizeTaskInput trims the free-text fields, rejects an empty title and
@@ -296,6 +302,7 @@ func (s *Service) CreateTask(ctx context.Context, userID, versionID string, inpu
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	view := taskView(*created, plan.ID, plan.Title, plan.Mode, time.Time{})
 	return &view, nil
 }
@@ -405,12 +412,13 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	view := taskView(updated, plan.ID, plan.Title, plan.Mode, time.Time{})
 	return &view, nil
 }
 
 func (s *Service) DeleteTask(ctx context.Context, userID, taskID string) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var task model.Task
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error; err != nil {
 			return mapNotFound(err)
@@ -426,7 +434,11 @@ func (s *Service) DeleteTask(ctx context.Context, userID, taskID string) error {
 			return err
 		}
 		return bumpStructure(tx, userID, task.PlanVersionID)
-	})
+	}); err != nil {
+		return err
+	}
+	s.invalidate(ctx, userID)
+	return nil
 }
 
 func (s *Service) SetTaskStatus(ctx context.Context, userID, taskID, action string) (*TaskView, error) {
@@ -491,6 +503,7 @@ func (s *Service) SetTaskStatus(ctx context.Context, userID, taskID, action stri
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	view := taskView(updated, plan.ID, plan.Title, plan.Mode, time.Time{})
 	return &view, nil
 }
@@ -531,6 +544,7 @@ func (s *Service) StartSession(ctx context.Context, userID, taskID string) (*Ses
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	view := sessionView(session)
 	return &view, nil
 }
@@ -595,6 +609,7 @@ func (s *Service) endSession(ctx context.Context, userID, sessionID, status, not
 	if err != nil {
 		return nil, err
 	}
+	s.invalidate(ctx, userID)
 	view := sessionView(session)
 	return &view, nil
 }

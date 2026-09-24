@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"studyflow/internal/cache"
 	"studyflow/internal/config"
 	"studyflow/internal/database"
 	"studyflow/internal/identity"
@@ -16,6 +19,25 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// newCache builds the read-model cache, or returns nil when caching is switched
+// off or the backend is unreachable. A nil cache makes the service read straight
+// from MySQL, so a Redis outage degrades rather than breaks.
+func newCache(cfg config.Config, logger *slog.Logger) app.Cache {
+	if !cfg.CacheEnabled {
+		logger.Info("cache disabled")
+		return nil
+	}
+	store := cache.New(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB, cfg.CacheTTL, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := store.Ping(ctx); err != nil {
+		logger.Warn("cache unreachable at startup, serving from mysql", "addr", cfg.RedisAddr, "error", err)
+		return nil
+	}
+	logger.Info("cache enabled", "addr", cfg.RedisAddr, "ttl", cfg.CacheTTL.String())
+	return store
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -28,7 +50,7 @@ func main() {
 		log.Fatal(err)
 	}
 	authenticator := identity.NewAuthenticator(cfg.AuthJWKSURL, cfg.AuthIssuer, cfg.AuthAudience, cfg.JWKSCacheTTL)
-	service := app.NewService(db)
+	service := app.NewServiceWithCache(db, newCache(cfg, logger))
 	handler := app.NewHTTPHandler(service)
 
 	router := gin.New()
