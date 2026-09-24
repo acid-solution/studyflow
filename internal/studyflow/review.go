@@ -132,6 +132,25 @@ func (s *Service) WeeklyReview(ctx context.Context, userID, requestedStart strin
 		startLocal = beginningOfWeek(s.now().In(location), pref.WeekStart)
 	}
 	startLocal = dateOnly(startLocal)
+
+	// Keyed by the resolved week rather than the request, so "this week" stops
+	// being served from the cache the moment the week rolls over, even if nothing
+	// was written in between.
+	key := weeklyReviewKey(userID, startLocal.Format("2006-01-02"), s.cache.Generation(ctx, userID))
+	var cached WeeklyReview
+	if s.cache.Read(ctx, key, &cached) {
+		return &cached, nil
+	}
+	review, err := s.loadWeeklyReview(ctx, userID, location, startLocal)
+	if err != nil {
+		return nil, err
+	}
+	s.cache.Write(ctx, key, review)
+	return review, nil
+}
+
+// loadWeeklyReview runs the week's aggregates straight from MySQL.
+func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location *time.Location, startLocal time.Time) (*WeeklyReview, error) {
 	endLocal := startLocal.AddDate(0, 0, 7)
 	startUTC, endUTC := startLocal.UTC(), endLocal.UTC()
 	review := &WeeklyReview{WeekStart: startLocal.Format("2006-01-02"), WeekEnd: endLocal.AddDate(0, 0, -1).Format("2006-01-02"), Daily: make([]DailyInvestment, 7), Plans: []PlanReview{}}

@@ -211,16 +211,30 @@ docker compose --env-file .env.compose up --build -d
 
 ## 读缓存
 
-`GET /goals/tree` 读得最频繁——目标页每次打开要读，MCP 的 `query_progress` 每次调用也要读——而它要跑四次查询再拼树，还要递归算一遍 `ready_to_complete`。这一条走 Redis。
+三条读路径走 Redis，都是"读得频繁或很重、且失效边界清晰"的聚合读：
+
+| 读路径 | 缓存前 | 缓存后 | 为什么选它 |
+| --- | --- | --- | --- |
+| `GET /reviews/weekly` | 20.9 ms | 5.1 ms | 最重的读，多次聚合；按周缓存，一周内几乎不变 |
+| `GET /goals/tree` | 10.5 ms | 3.6 ms | 四次查询再拼树，还要递归算 `ready_to_complete`；目标页和 MCP 的 `query_progress` 都读它 |
+| `GET /dashboard/today` | 11.6 ms | 8.7 ms | 前端默认页，每次打开都读。它和「全部任务」页共用的那次无筛选任务查询被缓存（6.3 → 4.0 ms） |
+
+数字是各 60 次请求的中位数，含 JWT 校验和完整 HTTP 往返。**带筛选的任务查询不进缓存**，直接走库——否则 key 要把筛选条件编码进去，还会把大量近似结果塞满缓存。
+
+`GET /plans` 仍然是 19 ms 且没有缓存，是下一个可做的点。
 
 **失效按代数做，不是删 key。** 每个用户的当前代数会进 key：
 
 ```text
-sf:v1:gen:<user_id>              ← 任何写操作 INCR 一次
-sf:v1:goaltree:<user_id>:<gen>   ← 值：目标树 JSON
+sf:v1:gen:<user_id>                     ← 任何写操作 INCR 一次
+sf:v1:goaltree:<user_id>:<gen>
+sf:v1:tasklist:<user_id>:<gen>
+sf:v1:review:<user_id>:<week_start>:<gen>
 ```
 
-会改动目标树的写路径有十七处（目标、计划、版本、阶段、任务、计时、导入）。逐个删 key 就是十七次漏掉的机会，而且 `dashboard` 那类 key 还带日期，删之前得先算出是哪天。改成代数之后，失效只有一处，旧 key 自然不可达，靠 TTL 回收。
+会改动这些读的写路径有十七处（目标、计划、版本、阶段、任务、计时、导入）。逐个删 key 就是十七次漏掉的机会，而且周报的 key 还带周起始日，删之前得先算出是哪周。改成代数之后，失效只有一处，旧 key 自然不可达，靠 TTL 回收。
+
+周报的 key 用的是**解析之后**的周起始日而不是请求参数，所以"本周"这个说法在跨周的那一刻就自动失效，即使期间没有任何写操作。
 
 **缓存挂了不影响业务。** 所有 Redis 操作都是 fail-open：连不上、超时或解码失败一律当成未命中，直接回源 MySQL。`CACHE_ENABLED=false` 就是纯 MySQL 版本，启动时 ping 不通也会自动退回这个模式。每次操作还有 200ms 超时，避免卡住的 Redis 拖慢请求。
 

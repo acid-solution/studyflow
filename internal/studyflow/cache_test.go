@@ -396,3 +396,136 @@ func draftVersion(t *testing.T, service *Service, ctx context.Context, userID, g
 	}
 	return plan.Versions[0].ID
 }
+
+func TestTaskListCacheIntegration(t *testing.T) {
+	dsn := os.Getenv("TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("TEST_MYSQL_DSN is not set")
+	}
+	db, err := database.OpenMySQL(dsn, "../../migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newFakeCache()
+	service := NewServiceWithCache(db, store)
+	userID := uuid.NewString()
+	defer cleanupUser(t, db, userID)
+	ctx := t.Context()
+
+	goal, err := service.CreateGoal(ctx, userID, CreateGoalInput{Title: "任务列表缓存目标"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := draftVersion(t, service, ctx, userID, goal.ID, "任务列表缓存计划")
+	task, err := service.CreateTask(ctx, userID, version, CreateTaskInput{Title: "缓存任务"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ActivatePlanVersion(ctx, userID, version); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. The unfiltered list is cached, so a change made behind the service's back
+	// stays invisible on the next read.
+	if _, err := service.ListTasks(ctx, userID, TaskFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("UPDATE tasks SET title = ? WHERE id = ?", "绕过服务层的修改", task.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.ListTasks(ctx, userID, TaskFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].Title != "缓存任务" {
+		t.Fatalf("the unfiltered read should have come from the cache: %+v", second)
+	}
+
+	// 2. A filtered read goes straight to the database and therefore sees it.
+	filtered, err := service.ListTasks(ctx, userID, TaskFilter{Status: model.TaskStatusTodo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0].Title != "绕过服务层的修改" {
+		t.Fatalf("a filtered read must not be served from the cache: %+v", filtered)
+	}
+
+	// 3. A write through the service invalidates the cached list.
+	if _, err := service.UpdateTask(ctx, userID, task.ID, UpdateTaskInput{Version: task.Version, Title: stringPointer("通过服务改名")}); err != nil {
+		t.Fatal(err)
+	}
+	third, err := service.ListTasks(ctx, userID, TaskFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third) != 1 || third[0].Title != "通过服务改名" {
+		t.Fatalf("a write must invalidate the cached list: %+v", third)
+	}
+}
+
+func TestWeeklyReviewCacheIntegration(t *testing.T) {
+	dsn := os.Getenv("TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("TEST_MYSQL_DSN is not set")
+	}
+	db, err := database.OpenMySQL(dsn, "../../migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newFakeCache()
+	service := NewServiceWithCache(db, store)
+	userID := uuid.NewString()
+	defer cleanupUser(t, db, userID)
+	ctx := t.Context()
+
+	goal, err := service.CreateGoal(ctx, userID, CreateGoalInput{Title: "复盘缓存目标"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := draftVersion(t, service, ctx, userID, goal.ID, "复盘缓存计划")
+	// A date inside the current week, so the task counts towards the review.
+	today := dateOnly(service.now().UTC())
+	task, err := service.CreateTask(ctx, userID, version, CreateTaskInput{Title: "复盘任务", ScheduledDate: stringPointer(today.Format("2006-01-02"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ActivatePlanVersion(ctx, userID, version); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. The first read fills the cache.
+	first, err := service.WeeklyReview(ctx, userID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.CompletedTasks != 0 {
+		t.Fatalf("nothing is done yet: %+v", first)
+	}
+
+	// 2. A change made behind the service's back stays invisible.
+	if err := db.Exec("UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?", service.now().UTC(), task.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.WeeklyReview(ctx, userID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.CompletedTasks != 0 {
+		t.Fatalf("the second read should have come from the cache: %+v", second)
+	}
+
+	// 3. A write through the service invalidates, and the next read is fresh.
+	if err := db.Exec("UPDATE tasks SET status = 'todo', completed_at = NULL WHERE id = ?", task.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SetTaskStatus(ctx, userID, task.ID, "complete"); err != nil {
+		t.Fatal(err)
+	}
+	third, err := service.WeeklyReview(ctx, userID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.CompletedTasks != 1 {
+		t.Fatalf("a write must invalidate the review cache: %+v", third)
+	}
+}

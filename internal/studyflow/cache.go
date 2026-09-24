@@ -44,3 +44,11 @@ func goalTreeKey(userID string, generation int64) string {
 func (s *Service) invalidate(ctx context.Context, userID string) {
 	s.cache.Bump(ctx, userID)
 }
+
+func taskListKey(userID string, generation int64) string {
+	return fmt.Sprintf("%s:tasklist:%s:%d", cacheKeyPrefix, userID, generation)
+}
+
+func weeklyReviewKey(userID, weekStart string, generation int64) string {
+	return fmt.Sprintf("%s:review:%s:%s:%d", cacheKeyPrefix, userID, weekStart, generation)
+}

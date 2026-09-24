@@ -615,7 +615,34 @@ func (s *Service) endSession(ctx context.Context, userID, sessionID, status, not
 	return &view, nil
 }
 
+// ListTasks returns the caller's tasks, reading the unfiltered list through the
+// cache.
+//
+// Only the unfiltered case is cached: it is what the dashboard and the task page
+// both ask for, and it is the expensive one. A filtered query is answered
+// directly, which keeps the cache key from having to encode the filter and keeps
+// filtered reads from filling the cache with near-duplicates.
 func (s *Service) ListTasks(ctx context.Context, userID string, filter TaskFilter) ([]TaskView, error) {
+	cacheable := filter == TaskFilter{}
+	key := ""
+	if cacheable {
+		key = taskListKey(userID, s.cache.Generation(ctx, userID))
+		var cached []TaskView
+		if s.cache.Read(ctx, key, &cached) {
+			return cached, nil
+		}
+	}
+	items, err := s.loadTasks(ctx, userID, filter)
+	if err != nil {
+		return nil, err
+	}
+	if cacheable {
+		s.cache.Write(ctx, key, items)
+	}
+	return items, nil
+}
+
+func (s *Service) loadTasks(ctx context.Context, userID string, filter TaskFilter) ([]TaskView, error) {
 	type row struct {
 		model.Task
 		PlanID    string
