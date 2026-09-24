@@ -34,6 +34,7 @@ func main() {
 	router := gin.New()
 	router.Use(middleware.RequestID(), middleware.RequestLogger(logger), gin.Recovery(), cors(cfg.FrontendURL))
 	app.RegisterRoutes(router, handler, authenticator.Middleware(), db)
+	app.RegisterMCP(router, service, authenticator, logger)
 	frontendIndex := filepath.Join("frontend", "dist", "index.html")
 	if _, err := os.Stat(frontendIndex); err == nil {
 		router.Static("/assets", filepath.Join("frontend", "dist", "assets"))

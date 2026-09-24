@@ -54,17 +54,20 @@ type ImportPlanTreeInput struct {
 	Tasks                 []ImportTaskInput      `json:"tasks"`
 }
 
+// These types are input-only, so omitempty changes nothing for the REST API
+// (Go ignores it when decoding) but does tell the MCP schema which fields are
+// genuinely optional.
 type ImportMilestoneInput struct {
-	Title   string            `json:"title"`
-	Outcome string            `json:"outcome"`
-	Tasks   []ImportTaskInput `json:"tasks"`
+	Title   string            `json:"title" jsonschema:"阶段名称"`
+	Outcome string            `json:"outcome,omitempty" jsonschema:"这个阶段要达成什么"`
+	Tasks   []ImportTaskInput `json:"tasks,omitempty" jsonschema:"属于这个阶段的任务，顺序即任务顺序"`
 }
 
 type ImportTaskInput struct {
-	Title           string  `json:"title"`
-	Description     string  `json:"description"`
-	EstimateMinutes uint    `json:"estimate_minutes"`
-	ScheduledDate   *string `json:"scheduled_date"`
+	Title           string  `json:"title" jsonschema:"任务名称"`
+	Description     string  `json:"description,omitempty" jsonschema:"任务说明"`
+	EstimateMinutes uint    `json:"estimate_minutes,omitempty" jsonschema:"预计投入分钟数"`
+	ScheduledDate   *string `json:"scheduled_date,omitempty" jsonschema:"计划日期 YYYY-MM-DD；留空表示暂不安排日期。按课时的计划不能填"`
 }
 
 type ImportPlanTreeResult struct {

@@ -26,6 +26,8 @@ var ErrInvalidToken = errors.New("invalid access token")
 type Principal struct {
 	UserID    string
 	SessionID string
+	// ExpiresAt is the expiry declared by the token, already validated.
+	ExpiresAt time.Time
 }
 
 type jwk struct {
@@ -110,7 +112,14 @@ func (a *Authenticator) Parse(ctx context.Context, raw string) (Principal, error
 	if _, err := uuid.Parse(values.SessionID); err != nil {
 		return Principal{}, ErrInvalidToken
 	}
-	return Principal{UserID: values.Subject, SessionID: values.SessionID}, nil
+	// ExpiresAt is the expiry the token declared, already enforced above. Callers
+	// that hand the principal to another layer need it so that layer can apply its
+	// own freshness check instead of trusting an unset value.
+	principal := Principal{UserID: values.Subject, SessionID: values.SessionID}
+	if values.ExpiresAt != nil {
+		principal.ExpiresAt = values.ExpiresAt.Time
+	}
+	return principal, nil
 }
 
 func (a *Authenticator) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
