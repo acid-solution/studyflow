@@ -41,6 +41,7 @@ func RegisterRoutes(router *gin.Engine, handler *HTTPHandler, auth gin.HandlerFu
 	api.POST("/plan-versions/:id/activate", handler.activatePlanVersion)
 	api.POST("/plan-versions/:id/milestones", handler.createMilestone)
 	api.POST("/plan-versions/:id/tasks", handler.createTask)
+	api.POST("/plan-imports", handler.importPlanTree)
 	api.PATCH("/milestones/:id", handler.updateMilestone)
 	api.DELETE("/milestones/:id", handler.deleteMilestone)
 	api.GET("/tasks", handler.listTasks)
@@ -206,6 +207,16 @@ func (h *HTTPHandler) listTasks(c *gin.Context) {
 	write(c, value, err)
 }
 
+func (h *HTTPHandler) importPlanTree(c *gin.Context) {
+	var input ImportPlanTreeInput
+	if !bind(c, &input) {
+		return
+	}
+	userID, _ := identity.UserID(c)
+	value, err := h.service.ImportPlanTree(c, userID, c.GetHeader("Idempotency-Key"), input)
+	write(c, value, err)
+}
+
 func (h *HTTPHandler) startSession(c *gin.Context) {
 	userID, _ := identity.UserID(c)
 	value, err := h.service.StartSession(c, userID, c.Param("id"))
@@ -277,6 +288,8 @@ func write(c *gin.Context, value any, err error) {
 		response.FailConflict(c, "version_conflict")
 	case errors.Is(err, ErrPlanVersionConflict):
 		response.FailConflict(c, "plan_version_conflict")
+	case errors.Is(err, ErrIdempotencyConflict):
+		response.FailConflict(c, "idempotency_key_conflict")
 	case errors.Is(err, ErrConflict):
 		response.FailConflict(c, "当前状态冲突")
 	case errors.Is(err, ErrInvalidState):

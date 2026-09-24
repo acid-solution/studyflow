@@ -121,6 +121,19 @@ type TaskScheduleEvent struct {
 	CreatedAt        time.Time  `gorm:"not null"`
 }
 
+// PlanImport is the receipt for one batch import. It is an immutable record: it
+// has no UpdatedAt because it is inserted and committed together with the plan
+// tree it describes, so a visible row always means the import succeeded.
+type PlanImport struct {
+	ID             string    `gorm:"type:char(36);primaryKey"`
+	UserID         string    `gorm:"type:char(36);not null;index"`
+	IdempotencyKey string    `gorm:"type:varchar(200);not null"`
+	RequestDigest  string    `gorm:"type:char(64);not null"`
+	PlanID         string    `gorm:"type:char(36);not null"`
+	PlanVersionID  string    `gorm:"type:char(36);not null"`
+	CreatedAt      time.Time `gorm:"not null"`
+}
+
 type UserPreference struct {
 	UserID             string `gorm:"type:char(36);primaryKey"`
 	Timezone           string `gorm:"type:varchar(64);not null"`
