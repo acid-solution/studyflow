@@ -306,7 +306,11 @@ func (s *Service) GoalTree(ctx context.Context, userID string) ([]*GoalNode, err
 	nodes := make(map[string]*GoalNode, len(goals))
 	for _, goal := range goals {
 		node := goalNode(goal)
-		node.Plans = plansByGoal[goal.ID]
+		// A map lookup misses for goals without plans; assigning it would overwrite
+		// the empty slice from goalNode with nil and serialize as JSON null.
+		if goalPlans, ok := plansByGoal[goal.ID]; ok {
+			node.Plans = goalPlans
+		}
 		nodes[goal.ID] = &node
 	}
 	roots := make([]*GoalNode, 0)
@@ -569,7 +573,7 @@ func (s *Service) ActivatePlanVersion(ctx context.Context, userID, versionID str
 }
 
 func (s *Service) versionView(ctx context.Context, userID string, version model.PlanVersion) (VersionView, error) {
-	view := VersionView{ID: version.ID, VersionNo: version.VersionNo, Status: version.Status, WeeklyCapacityMinutes: version.WeeklyCapacityMinutes, StartDate: formatDatePtr(version.StartDate), EndDate: formatDatePtr(version.EndDate), StructureRevision: version.StructureRevision, ActivatedAt: version.ActivatedAt, SupersededAt: version.SupersededAt}
+	view := VersionView{ID: version.ID, VersionNo: version.VersionNo, Status: version.Status, WeeklyCapacityMinutes: version.WeeklyCapacityMinutes, StartDate: formatDatePtr(version.StartDate), EndDate: formatDatePtr(version.EndDate), StructureRevision: version.StructureRevision, ActivatedAt: version.ActivatedAt, SupersededAt: version.SupersededAt, Milestones: []MilestoneView{}, UnassignedTasks: []TaskView{}}
 	var milestones []model.Milestone
 	if err := s.db.WithContext(ctx).Where("plan_version_id = ? AND user_id = ?", version.ID, userID).Order("position, id").Find(&milestones).Error; err != nil {
 		return view, err
@@ -588,7 +592,13 @@ func (s *Service) versionView(ctx context.Context, userID string, version model.
 		}
 	}
 	for _, milestone := range milestones {
-		view.Milestones = append(view.Milestones, MilestoneView{ID: milestone.ID, Title: milestone.Title, Outcome: milestone.Outcome, Position: milestone.Position, Tasks: byMilestone[milestone.ID]})
+		// byMilestone misses for milestones without tasks; the frontend treats the
+		// field as a non-null array.
+		milestoneTasks := byMilestone[milestone.ID]
+		if milestoneTasks == nil {
+			milestoneTasks = []TaskView{}
+		}
+		view.Milestones = append(view.Milestones, MilestoneView{ID: milestone.ID, Title: milestone.Title, Outcome: milestone.Outcome, Position: milestone.Position, Tasks: milestoneTasks})
 	}
 	return view, nil
 }
