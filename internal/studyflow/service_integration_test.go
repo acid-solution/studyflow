@@ -143,6 +143,38 @@ func TestPlanningExecutionAndReviewIntegration(t *testing.T) {
 	if _, err := service.SetTaskStatus(t.Context(), userID, todayTask.ID, "complete"); err != nil {
 		t.Fatalf("completing an already completed task should be idempotent: %v", err)
 	}
+	// Finished work gets its own section, and today holds only what is still open,
+	// so the same task never appears in both.
+	afterFinish, err := service.TodayDashboard(t.Context(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterFinish.CompletedToday) != 1 || afterFinish.CompletedToday[0].ID != todayTask.ID {
+		t.Fatalf("completed today should list the finished task: %+v", afterFinish.CompletedToday)
+	}
+	for _, task := range afterFinish.Today {
+		if task.Status == model.TaskStatusDone {
+			t.Fatalf("today should hold only open tasks, got %+v", task)
+		}
+	}
+	// A task due yesterday and finished today belongs in the finished section even
+	// though its scheduled date is in the past.
+	if _, err := service.SetTaskStatus(t.Context(), userID, overdue.ID, "complete"); err != nil {
+		t.Fatal(err)
+	}
+	afterLateFinish, err := service.TodayDashboard(t.Context(), userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lateFinished := false
+	for _, task := range afterLateFinish.CompletedToday {
+		if task.ID == overdue.ID {
+			lateFinished = true
+		}
+	}
+	if !lateFinished {
+		t.Fatalf("a task finished today is finished today even if it was due earlier: %+v", afterLateFinish.CompletedToday)
+	}
 
 	sequenceSession, err := service.StartSession(t.Context(), userID, sequenceTask.ID)
 	if err != nil {

@@ -73,6 +73,7 @@ export type Dashboard = {
   date: string
   overdue: Task[]
   today: Task[]
+  completed_today: Task[]
   sequence_plans: Array<{ plan_id: string; plan_title: string; done_tasks: number; total_tasks: number; next_task: Task | null }>
   future: Task[]
   running_session: { session: Session; task: Task } | null

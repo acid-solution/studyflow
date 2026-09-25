@@ -696,6 +696,7 @@ type Dashboard struct {
 	Date           string              `json:"date"`
 	Overdue        []TaskView          `json:"overdue"`
 	Today          []TaskView          `json:"today"`
+	CompletedToday []TaskView          `json:"completed_today"`
 	SequencePlans  []SequenceNextView  `json:"sequence_plans"`
 	Future         []TaskView          `json:"future"`
 	RunningSession *RunningSessionView `json:"running_session"`
@@ -729,9 +730,16 @@ func (s *Service) TodayDashboard(ctx context.Context, userID string) (*Dashboard
 	if err != nil {
 		return nil, err
 	}
-	dashboard := &Dashboard{Date: today.Format("2006-01-02"), Overdue: []TaskView{}, Today: []TaskView{}, SequencePlans: []SequenceNextView{}, Future: []TaskView{}}
+	dashboard := &Dashboard{Date: today.Format("2006-01-02"), Overdue: []TaskView{}, Today: []TaskView{}, CompletedToday: []TaskView{}, SequencePlans: []SequenceNextView{}, Future: []TaskView{}}
 	sequenceMap := map[string]*SequenceNextView{}
 	for _, task := range tasks {
+		// Finished today is defined by when it was finished, not by where it was
+		// scheduled. A task due yesterday that was only finished today belongs here,
+		// and so does a lesson from a sequence plan, which carries no date at all —
+		// so this is checked before the branches that skip undated and past tasks.
+		if pref.ShowCompletedToday && task.Status == model.TaskStatusDone && task.CompletedAt != nil && sameDate(task.CompletedAt.In(location), today) {
+			dashboard.CompletedToday = append(dashboard.CompletedToday, task)
+		}
 		if task.PlanMode == model.PlanModeSequence {
 			entry := sequenceMap[task.PlanID]
 			if entry == nil {
@@ -757,13 +765,19 @@ func (s *Service) TodayDashboard(ctx context.Context, userID string) (*Dashboard
 		if date.Before(today) && task.Status != model.TaskStatusDone {
 			dashboard.Overdue = append(dashboard.Overdue, task)
 		}
-		if sameDate(date, today) && (pref.ShowCompletedToday || task.Status != model.TaskStatusDone) {
+		// Today holds only what is still open, which is what the summary calls it.
+		// Finished tasks have their own section, so a task is never listed twice.
+		if sameDate(date, today) && task.Status != model.TaskStatusDone {
 			dashboard.Today = append(dashboard.Today, task)
 		}
 		if date.After(today) && !date.After(futureEnd) && task.Status != model.TaskStatusDone {
 			dashboard.Future = append(dashboard.Future, task)
 		}
 	}
+	// Most recently finished first.
+	sort.Slice(dashboard.CompletedToday, func(i, j int) bool {
+		return dashboard.CompletedToday[i].CompletedAt.After(*dashboard.CompletedToday[j].CompletedAt)
+	})
 	keys := make([]string, 0, len(sequenceMap))
 	for key := range sequenceMap {
 		keys = append(keys, key)
