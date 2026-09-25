@@ -399,7 +399,7 @@ func validateImportBounds(input ImportPlanTreeInput) error {
 	if total > importMaxTasks {
 		return fmt.Errorf("%w: at most %d tasks per import", ErrValidation, importMaxTasks)
 	}
-	if len(input.Title) > importMaxPlanTitle {
+	if titleTooLong(input.Title, importMaxPlanTitle) {
 		return fmt.Errorf("%w: plan title too long", ErrValidation)
 	}
 	if len(input.Description) > importMaxText {
@@ -409,7 +409,7 @@ func validateImportBounds(input ImportPlanTreeInput) error {
 		return fmt.Errorf("%w: weekly capacity out of range", ErrValidation)
 	}
 	for _, group := range input.Milestones {
-		if len(group.Title) > importMaxMilestoneTitle {
+		if titleTooLong(group.Title, importMaxMilestoneTitle) {
 			return fmt.Errorf("%w: milestone title too long", ErrValidation)
 		}
 		if len(group.Outcome) > importMaxText {
@@ -430,7 +430,7 @@ func validateImportBounds(input ImportPlanTreeInput) error {
 }
 
 func validateImportTaskBounds(task ImportTaskInput) error {
-	if len(task.Title) > importMaxTaskTitle {
+	if titleTooLong(task.Title, importMaxTaskTitle) {
 		return fmt.Errorf("%w: task title too long", ErrValidation)
 	}
 	if len(task.Description) > importMaxText {

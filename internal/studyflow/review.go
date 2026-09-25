@@ -109,6 +109,9 @@ func (s *Service) UpdatePreferences(ctx context.Context, userID string, input Up
 	if err := s.db.WithContext(ctx).Model(&model.UserPreference{}).Where("user_id = ?", userID).Updates(changes).Error; err != nil {
 		return nil, err
 	}
+	// Timezone and week start decide how the cached task list marks overdue items
+	// and how the cached review buckets days, so this write has to invalidate too.
+	s.invalidate(ctx, userID)
 	return s.GetPreferences(ctx, userID)
 }
 
@@ -136,16 +139,21 @@ func (s *Service) WeeklyReview(ctx context.Context, userID, requestedStart strin
 	// Keyed by the resolved week rather than the request, so "this week" stops
 	// being served from the cache the moment the week rolls over, even if nothing
 	// was written in between.
-	key := weeklyReviewKey(userID, startLocal.Format("2006-01-02"), s.cache.Generation(ctx, userID))
-	var cached WeeklyReview
-	if s.cache.Read(ctx, key, &cached) {
-		return &cached, nil
+	generation, known := s.cache.Generation(ctx, userID)
+	key := weeklyReviewKey(userID, startLocal.Format("2006-01-02"), generation)
+	if known {
+		var cached WeeklyReview
+		if s.cache.Read(ctx, key, &cached) {
+			return &cached, nil
+		}
 	}
 	review, err := s.loadWeeklyReview(ctx, userID, location, startLocal)
 	if err != nil {
 		return nil, err
 	}
-	s.cache.Write(ctx, key, review)
+	if known {
+		s.cache.Write(ctx, key, review)
+	}
 	return review, nil
 }
 

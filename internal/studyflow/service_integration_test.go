@@ -3,6 +3,7 @@ package studyflow
 import (
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -560,6 +561,93 @@ func TestPlanTreeImportIntegration(t *testing.T) {
 	}
 	if got := countRowsForKey(t, db, "import-key-oversized"); got != 0 {
 		t.Fatalf("an oversized request must not claim the key, got %d receipts", got)
+	}
+}
+
+// A task that had been rescheduled used to be undeletable: the schedule-event
+// foreign key was ON DELETE RESTRICT and nothing ever removed the events, so
+// deleting the task failed with MySQL 1451 and surfaced as a 500.
+func TestRescheduledTaskCanBeDeletedIntegration(t *testing.T) {
+	dsn := os.Getenv("TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("TEST_MYSQL_DSN is not set")
+	}
+	db, err := database.OpenMySQL(dsn, "../../migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(db)
+	userID := uuid.NewString()
+	defer cleanupUser(t, db, userID)
+	ctx := t.Context()
+
+	goal, err := service.CreateGoal(ctx, userID, CreateGoalInput{Title: "删除目标"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := draftVersion(t, service, ctx, userID, goal.ID, "删除计划")
+	task, err := service.CreateTask(ctx, userID, version, CreateTaskInput{Title: "待删任务", ScheduledDate: stringPointer("2026-05-01")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rescheduling writes a task_schedule_events row pointing at the task.
+	if _, err := service.UpdateTask(ctx, userID, task.ID, UpdateTaskInput{Version: task.Version, ScheduledDate: stringPointer("2026-05-08")}); err != nil {
+		t.Fatal(err)
+	}
+	var events int64
+	if err := db.Model(&model.TaskScheduleEvent{}).Where("task_id = ?", task.ID).Count(&events).Error; err != nil {
+		t.Fatal(err)
+	}
+	if events == 0 {
+		t.Fatal("rescheduling should have written a schedule event")
+	}
+
+	if err := service.DeleteTask(ctx, userID, task.ID); err != nil {
+		t.Fatalf("a rescheduled task must still be deletable: %v", err)
+	}
+	if err := db.Model(&model.TaskScheduleEvent{}).Where("task_id = ?", task.ID).Count(&events).Error; err != nil {
+		t.Fatal(err)
+	}
+	if events != 0 {
+		t.Fatalf("the events should have gone with the task, %d left", events)
+	}
+}
+
+// Title limits are character limits: varchar counts characters, so a CJK title
+// that fits the column must be accepted, and the import path has to agree with
+// the ordinary one.
+func TestTitleLimitsIntegration(t *testing.T) {
+	dsn := os.Getenv("TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("TEST_MYSQL_DSN is not set")
+	}
+	db, err := database.OpenMySQL(dsn, "../../migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(db)
+	userID := uuid.NewString()
+	defer cleanupUser(t, db, userID)
+	ctx := t.Context()
+
+	atLimit := strings.Repeat("汉", 160)
+	goal, err := service.CreateGoal(ctx, userID, CreateGoalInput{Title: atLimit})
+	if err != nil {
+		t.Fatalf("160 CJK characters fit varchar(160): %v", err)
+	}
+	if _, err := service.CreateGoal(ctx, userID, CreateGoalInput{Title: atLimit + "汉"}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("161 characters should be rejected, got %v", err)
+	}
+	// The import path has to accept exactly the same titles.
+	if _, err := service.ImportPlanTree(ctx, userID, "title-limit-key", ImportPlanTreeInput{
+		GoalID: goal.ID, Title: atLimit, Mode: model.PlanModeCalendar,
+	}); err != nil {
+		t.Fatalf("the import must accept what the ordinary path accepts: %v", err)
+	}
+	if _, err := service.ImportPlanTree(ctx, userID, "title-limit-key-2", ImportPlanTreeInput{
+		GoalID: goal.ID, Title: atLimit + "汉", Mode: model.PlanModeCalendar,
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("an over-long import title should be rejected, got %v", err)
 	}
 }
 

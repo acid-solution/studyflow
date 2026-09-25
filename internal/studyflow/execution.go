@@ -75,7 +75,7 @@ type FinishSessionInput struct {
 func normalizeMilestoneInput(input CreateMilestoneInput) (CreateMilestoneInput, error) {
 	input.Title = strings.TrimSpace(input.Title)
 	input.Outcome = strings.TrimSpace(input.Outcome)
-	if input.Title == "" {
+	if input.Title == "" || titleTooLong(input.Title, titleLimitMilestone) {
 		return input, ErrValidation
 	}
 	return input, nil
@@ -221,7 +221,7 @@ func (s *Service) DeleteMilestone(ctx context.Context, userID, milestoneID strin
 func normalizeTaskInput(input CreateTaskInput) (CreateTaskInput, *time.Time, error) {
 	input.Title = strings.TrimSpace(input.Title)
 	input.Description = strings.TrimSpace(input.Description)
-	if input.Title == "" {
+	if input.Title == "" || titleTooLong(input.Title, titleLimitTask) {
 		return input, nil, ErrValidation
 	}
 	date, err := parseOptionalDate(input.ScheduledDate)
@@ -622,17 +622,30 @@ func (s *Service) endSession(ctx context.Context, userID, sessionID, status, not
 // both ask for, and it is the expensive one. A filtered query is answered
 // directly, which keeps the cache key from having to encode the filter and keeps
 // filtered reads from filling the cache with near-duplicates.
+//
+// The key carries the caller's local date because is_overdue is computed from it:
+// without the date an entry written before midnight would keep serving yesterday's
+// overdue flags until it expired.
 func (s *Service) ListTasks(ctx context.Context, userID string, filter TaskFilter) ([]TaskView, error) {
-	cacheable := filter == TaskFilter{}
-	key := ""
+	pref, err := s.GetPreferences(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	location, err := time.LoadLocation(pref.Timezone)
+	if err != nil {
+		location = time.UTC
+	}
+	today := dateOnly(s.now().In(location))
+	generation, known := s.cache.Generation(ctx, userID)
+	cacheable := filter == TaskFilter{} && known
+	key := taskListKey(userID, today.Format("2006-01-02"), generation)
 	if cacheable {
-		key = taskListKey(userID, s.cache.Generation(ctx, userID))
 		var cached []TaskView
 		if s.cache.Read(ctx, key, &cached) {
 			return cached, nil
 		}
 	}
-	items, err := s.loadTasks(ctx, userID, filter)
+	items, err := s.loadTasks(ctx, userID, filter, today)
 	if err != nil {
 		return nil, err
 	}
@@ -642,7 +655,7 @@ func (s *Service) ListTasks(ctx context.Context, userID string, filter TaskFilte
 	return items, nil
 }
 
-func (s *Service) loadTasks(ctx context.Context, userID string, filter TaskFilter) ([]TaskView, error) {
+func (s *Service) loadTasks(ctx context.Context, userID string, filter TaskFilter, today time.Time) ([]TaskView, error) {
 	type row struct {
 		model.Task
 		PlanID    string
@@ -672,12 +685,6 @@ func (s *Service) loadTasks(ctx context.Context, userID string, filter TaskFilte
 	if err := query.Order("t.scheduled_date IS NULL, t.scheduled_date, p.title, t.position, t.id").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	pref, err := s.GetPreferences(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	location, _ := time.LoadLocation(pref.Timezone)
-	today := dateOnly(s.now().In(location))
 	result := make([]TaskView, 0, len(rows))
 	for _, value := range rows {
 		result = append(result, taskView(value.Task, value.PlanID, value.PlanTitle, value.PlanMode, today))

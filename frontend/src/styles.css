@@ -382,7 +382,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .switch.is-on { background: var(--primary); }
 .switch.is-on span { transform: translateX(16px); }
 .connection-row { grid-template-columns: 36px minmax(0, 1fr) auto auto; }
-.connection-row .source-mark { width: 34px; height: 34px; }
 .mcp-mark { background: #7053b5; }
 .connection-row em { color: #24784e; font-size: 9px; font-style: normal; }
 

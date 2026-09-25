@@ -237,6 +237,14 @@ const sampleDraft = `{
   "tasks": [{ "title": "未分阶段任务", "estimate_minutes": 20 }]
 }`
 
+// crypto.randomUUID only exists in a secure context, and the container
+// deployment serves plain HTTP on a LAN address, so fall back to something that
+// still satisfies the server's 8-200 printable ASCII rule.
+function newIdempotencyKey() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return `ui-${crypto.randomUUID()}`
+  return `ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+}
+
 function SourceBadge({ source }: { source: TaskSource }) {
   if (source !== 'agent') return null
   return <span className="source-badge" title="由 Agent 通过 MCP 导入">Agent 导入</span>
@@ -254,8 +262,9 @@ function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: st
   const all = flattenGoals(goals.data ?? [])
   useEffect(() => { if (!goalID && all[0]) setGoalID(all[0].goal.id) }, [goalID, all])
 
-  // 改草稿就作废幂等键：同一份草稿再点一次确认是重放，改了内容才算新的一次导入。
+  // 改草稿或换目标都作废幂等键：同一份输入再点一次确认是重放，输入变了才算新的一次导入。
   const editDraft = (value: string) => { setDraft(value); setKey(''); setResult(null); setError('') }
+  const changeGoal = (value: string) => { setGoalID(value); setKey(''); setResult(null); setError('') }
 
   let preview: { title: string; mode: string; milestones: number; tasks: number } | null = null
   let parseError = ''
@@ -278,13 +287,16 @@ function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: st
     setBusy(true); setError('')
     try {
       const body = JSON.parse(draft) as ImportDraft
-      const idempotencyKey = key || `ui-${crypto.randomUUID()}`
+      // Mint the key and store it before sending: if the response is lost the next
+      // click has to reuse it, otherwise the retry would import a second copy —
+      // exactly what the key exists to prevent.
+      const idempotencyKey = key || newIdempotencyKey()
+      setKey(idempotencyKey)
       const value = await api<PlanImportResult>(token, '/plan-imports', {
         method: 'POST',
         headers: { 'Idempotency-Key': idempotencyKey },
         body: JSON.stringify({ ...body, goal_id: goalID }),
       })
-      setKey(idempotencyKey)
       setResult(value)
       await history.reload()
     } catch (reason) { setError(messageOf(reason)) } finally { setBusy(false) }
@@ -294,7 +306,7 @@ function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: st
     <section className="import-layout">
       <div className="import-form">
         <label><span>导入到哪个目标</span>
-          <select value={goalID} onChange={(event) => setGoalID(event.target.value)} disabled={!all.length}>
+          <select value={goalID} onChange={(event) => changeGoal(event.target.value)} disabled={!all.length}>
             {all.map(({ goal, depth }) => <option key={goal.id} value={goal.id}>{'　'.repeat(depth)}{goal.title}</option>)}
           </select>
         </label>

@@ -159,19 +159,32 @@ func (h *MCPHandler) importPlanTree(ctx context.Context, req *mcp.CallToolReques
 	if err != nil {
 		return nil, ImportPlanTreeOutput{}, toolError("导入计划失败", err)
 	}
+	version := importedVersion(result.Plan, result.PlanVersionID)
 	output := ImportPlanTreeOutput{
 		ImportID:      result.ImportID,
 		Replayed:      result.Replayed,
 		PlanID:        result.PlanID,
 		PlanVersionID: result.PlanVersionID,
-		VersionStatus: result.Plan.Versions[0].Status,
+		VersionStatus: version.Status,
 	}
-	for _, milestone := range result.Plan.Versions[0].Milestones {
+	for _, milestone := range version.Milestones {
 		output.Milestones++
 		output.Tasks += len(milestone.Tasks)
 	}
-	output.Tasks += len(result.Plan.Versions[0].UnassignedTasks)
+	output.Tasks += len(version.UnassignedTasks)
 	return nil, output, nil
+}
+
+// importedVersion finds the version the import created. GetPlan orders versions
+// newest first, so Versions[0] is not necessarily it: once the user clones a new
+// draft, a replay would otherwise describe that newer version instead.
+func importedVersion(detail *PlanDetail, versionID string) VersionView {
+	for _, version := range detail.Versions {
+		if version.ID == versionID {
+			return version
+		}
+	}
+	return VersionView{}
 }
 
 func (h *MCPHandler) queryProgress(ctx context.Context, req *mcp.CallToolRequest, args QueryProgressArgs) (*mcp.CallToolResult, QueryProgressOutput, error) {

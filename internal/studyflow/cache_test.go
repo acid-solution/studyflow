@@ -48,10 +48,10 @@ func (f *fakeCache) Write(_ context.Context, key string, value any) {
 	f.mu.Unlock()
 }
 
-func (f *fakeCache) Generation(_ context.Context, userID string) int64 {
+func (f *fakeCache) Generation(_ context.Context, userID string) (int64, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.gens[userID]
+	return f.gens[userID], true
 }
 
 func (f *fakeCache) Bump(_ context.Context, userID string) {
@@ -119,7 +119,10 @@ func TestGoalTreeCacheIntegration(t *testing.T) {
 	// 3. Every write path has to bump the generation; a path that forgets is the
 	// one failure mode this design has. Each step builds its own fixtures, then
 	// records the counter, runs the write and checks it moved.
-	generation := func() int64 { return store.Generation(ctx, userID) }
+	generation := func() int64 {
+		value, _ := store.Generation(ctx, userID)
+		return value
+	}
 	steps := []struct {
 		name string
 		run  func() error

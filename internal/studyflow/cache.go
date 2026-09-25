@@ -19,7 +19,11 @@ import (
 type Cache interface {
 	Read(ctx context.Context, key string, target any) bool
 	Write(ctx context.Context, key string, value any)
-	Generation(ctx context.Context, userID string) int64
+	// Generation reports the caller's current generation and whether it could be
+	// read at all. A caller that gets false has to skip the cache entirely rather
+	// than fall back to zero, because zero is a real generation that entries were
+	// written under.
+	Generation(ctx context.Context, userID string) (int64, bool)
 	Bump(ctx context.Context, userID string)
 }
 
@@ -29,7 +33,7 @@ type noopCache struct{}
 
 func (noopCache) Read(context.Context, string, any) bool    { return false }
 func (noopCache) Write(context.Context, string, any)        {}
-func (noopCache) Generation(context.Context, string) int64  { return 0 }
+func (noopCache) Generation(context.Context, string) (int64, bool) { return 0, false }
 func (noopCache) Bump(context.Context, string)              {}
 
 const cacheKeyPrefix = "sf:v1"
@@ -45,8 +49,8 @@ func (s *Service) invalidate(ctx context.Context, userID string) {
 	s.cache.Bump(ctx, userID)
 }
 
-func taskListKey(userID string, generation int64) string {
-	return fmt.Sprintf("%s:tasklist:%s:%d", cacheKeyPrefix, userID, generation)
+func taskListKey(userID, today string, generation int64) string {
+	return fmt.Sprintf("%s:tasklist:%s:%s:%d", cacheKeyPrefix, userID, today, generation)
 }
 
 func weeklyReviewKey(userID, weekStart string, generation int64) string {

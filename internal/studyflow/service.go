@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"studyflow/internal/model"
 
@@ -27,6 +28,22 @@ var (
 	// layer switches on errors.Is, so it must stay distinguishable.
 	ErrIdempotencyConflict = errors.New("idempotency key conflict")
 )
+
+// Title limits. MySQL counts characters for varchar, so these are character
+// limits and have to be checked with utf8.RuneCountInString — a byte count would
+// reject CJK titles the schema accepts. They also keep an oversized value from
+// reaching MySQL, where strict mode turns it into error 1406 and the API would
+// answer 500 instead of 400.
+const (
+	titleLimitGoal      = 160
+	titleLimitPlan      = 160
+	titleLimitMilestone = 160
+	titleLimitTask      = 255
+)
+
+func titleTooLong(value string, limit int) bool {
+	return utf8.RuneCountInString(value) > limit
+}
 
 type Service struct {
 	db    *gorm.DB
@@ -167,8 +184,12 @@ type TaskView struct {
 }
 
 func (s *Service) CreateGoal(ctx context.Context, userID string, input CreateGoalInput) (*GoalNode, error) {
-	if strings.TrimSpace(input.Title) == "" {
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
 		return nil, fmt.Errorf("%w: title is required", ErrValidation)
+	}
+	if titleTooLong(title, titleLimitGoal) {
+		return nil, fmt.Errorf("%w: goal title too long", ErrValidation)
 	}
 	target, err := parseOptionalDate(input.TargetDate)
 	if err != nil {
@@ -208,6 +229,9 @@ func (s *Service) UpdateGoal(ctx context.Context, userID, goalID string, input U
 			title := strings.TrimSpace(*input.Title)
 			if title == "" {
 				return fmt.Errorf("%w: title is required", ErrValidation)
+			}
+			if titleTooLong(title, titleLimitGoal) {
+				return fmt.Errorf("%w: goal title too long", ErrValidation)
 			}
 			changes["title"] = title
 		}
@@ -272,16 +296,21 @@ func (s *Service) SetGoalStatus(ctx context.Context, userID, goalID, status stri
 
 // GoalTree returns the caller's goal tree, reading through the cache.
 func (s *Service) GoalTree(ctx context.Context, userID string) ([]*GoalNode, error) {
-	key := goalTreeKey(userID, s.cache.Generation(ctx, userID))
-	var cached []*GoalNode
-	if s.cache.Read(ctx, key, &cached) {
-		return cached, nil
+	generation, known := s.cache.Generation(ctx, userID)
+	key := goalTreeKey(userID, generation)
+	if known {
+		var cached []*GoalNode
+		if s.cache.Read(ctx, key, &cached) {
+			return cached, nil
+		}
 	}
 	roots, err := s.loadGoalTree(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	s.cache.Write(ctx, key, roots)
+	if known {
+		s.cache.Write(ctx, key, roots)
+	}
 	return roots, nil
 }
 
@@ -388,7 +417,7 @@ func (s *Service) loadGoalTree(ctx context.Context, userID string) ([]*GoalNode,
 func normalizePlanInput(input CreatePlanInput) (CreatePlanInput, *time.Time, *time.Time, error) {
 	input.Title = strings.TrimSpace(input.Title)
 	input.Description = strings.TrimSpace(input.Description)
-	if input.Title == "" || (input.Mode != model.PlanModeCalendar && input.Mode != model.PlanModeSequence) {
+	if input.Title == "" || titleTooLong(input.Title, titleLimitPlan) || (input.Mode != model.PlanModeCalendar && input.Mode != model.PlanModeSequence) {
 		return input, nil, nil, ErrValidation
 	}
 	startDate, err := parseOptionalDate(input.StartDate)
@@ -482,8 +511,12 @@ func (s *Service) ListPlans(ctx context.Context, userID, goalID, mode string) ([
 				summary.ActiveVersionNo = &n
 			}
 			var total, done int64
-			s.db.WithContext(ctx).Model(&model.Task{}).Where("plan_version_id = ? AND user_id = ? AND status <> ?", *plan.ActiveVersionID, userID, model.TaskStatusCanceled).Count(&total)
-			s.db.WithContext(ctx).Model(&model.Task{}).Where("plan_version_id = ? AND user_id = ? AND status = ?", *plan.ActiveVersionID, userID, model.TaskStatusDone).Count(&done)
+			if err := s.db.WithContext(ctx).Model(&model.Task{}).Where("plan_version_id = ? AND user_id = ? AND status <> ?", *plan.ActiveVersionID, userID, model.TaskStatusCanceled).Count(&total).Error; err != nil {
+				return nil, err
+			}
+			if err := s.db.WithContext(ctx).Model(&model.Task{}).Where("plan_version_id = ? AND user_id = ? AND status = ?", *plan.ActiveVersionID, userID, model.TaskStatusDone).Count(&done).Error; err != nil {
+				return nil, err
+			}
 			summary.TotalTasks, summary.DoneTasks = int(total), int(done)
 		}
 		var draft model.PlanVersion
@@ -539,6 +572,11 @@ func (s *Service) ClonePlanVersion(ctx context.Context, userID, planID string) (
 		}
 		created = model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: planID, VersionNo: base.VersionNo + 1, Status: model.PlanVersionDraft, WeeklyCapacityMinutes: base.WeeklyCapacityMinutes, StartDate: base.StartDate, EndDate: base.EndDate, BaseVersionID: &base.ID, BaseStructureRevision: base.StructureRevision, StructureRevision: 1}
 		if err := tx.Create(&created).Error; err != nil {
+			// Two clones racing both compute version_no = base + 1; the loser hits
+			// uk_plan_versions_number, which is a conflict and not a server error.
+			if isDuplicate(err) {
+				return ErrConflict
+			}
 			return err
 		}
 		var milestones []model.Milestone

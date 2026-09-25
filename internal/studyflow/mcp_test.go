@@ -254,6 +254,26 @@ func TestMCPToolsIntegration(t *testing.T) {
 		t.Fatalf("unexpected task from query_progress: %+v", target)
 	}
 
+	// 7b. A replay has to describe the version the import created, not whatever is
+	// newest now. Clone a version, add a task to it, then replay: the counts must
+	// stay at what the import produced.
+	cloned, err := service.ClonePlanVersion(ctx, userID, imported.PlanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateTask(ctx, userID, cloned.ID, CreateTaskInput{Title: "V2 追加的任务"}); err != nil {
+		t.Fatal(err)
+	}
+	afterClone, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "import_plan_tree", Arguments: importArgs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayedAgain := decodeStructured[ImportPlanTreeOutput](t, afterClone)
+	if replayedAgain.Milestones != imported.Milestones || replayedAgain.Tasks != imported.Tasks {
+		t.Fatalf("a replay must describe the imported version, not the newest: got %d/%d, want %d/%d",
+			replayedAgain.Milestones, replayedAgain.Tasks, imported.Milestones, imported.Tasks)
+	}
+
 	// 8. Reschedule with the version from the query.
 	moved, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "reschedule_task", Arguments: map[string]any{
 		"task_id": target.TaskID, "version": target.Version, "scheduled_date": "2026-04-10",

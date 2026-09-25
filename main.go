@@ -22,8 +22,10 @@ import (
 )
 
 // newCache builds the read-model cache, or returns nil when caching is switched
-// off or the backend is unreachable. A nil cache makes the service read straight
-// from MySQL, so a Redis outage degrades rather than breaks.
+// off. A store that cannot reach Redis at startup is still returned: it reports
+// every read as a miss until the backend answers, and Watch keeps retrying.
+// Returning nil there would leave caching off for the whole life of the process
+// just because Redis was slow to start.
 func newCache(cfg config.Config, logger *slog.Logger) app.Cache {
 	if !cfg.CacheEnabled {
 		logger.Info("cache disabled")
@@ -33,10 +35,11 @@ func newCache(cfg config.Config, logger *slog.Logger) app.Cache {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := store.Ping(ctx); err != nil {
-		logger.Warn("cache unreachable at startup, serving from mysql", "addr", cfg.RedisAddr, "error", err)
-		return nil
+		logger.Warn("cache unreachable at startup, serving from mysql until it comes back", "addr", cfg.RedisAddr, "error", err)
+	} else {
+		logger.Info("cache enabled", "addr", cfg.RedisAddr, "ttl", cfg.CacheTTL.String())
 	}
-	logger.Info("cache enabled", "addr", cfg.RedisAddr, "ttl", cfg.CacheTTL.String())
+	store.Watch(context.Background())
 	return store
 }
 
