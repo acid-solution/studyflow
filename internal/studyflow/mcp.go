@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"studyflow/internal/identity"
+	"studyflow/internal/model"
 
 	"github.com/gin-gonic/gin"
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -29,6 +30,9 @@ type ImportPlanTreeArgs struct {
 	IdempotencyKey        string                 `json:"idempotency_key" jsonschema:"调用方生成的幂等键，8 到 200 个可打印 ASCII 字符。超时后用同一个键重试不会重复建计划；换一个键才会新建"`
 	Title                 string                 `json:"title" jsonschema:"计划名称"`
 	Description           string                 `json:"description,omitempty" jsonschema:"计划说明"`
+	Objective             string                 `json:"objective" jsonschema:"完成计划后要达成的可验收子目标"`
+	SuccessCriteria       string                 `json:"success_criteria,omitempty" jsonschema:"计划目标的可选完成标准"`
+	TargetDate            *string                `json:"target_date,omitempty" jsonschema:"计划目标日期，格式 YYYY-MM-DD"`
 	Mode                  string                 `json:"mode" jsonschema:"calendar 按日期安排到天；sequence 按课时依次推进。sequence 模式下任务不能带日期"`
 	WeeklyCapacityMinutes uint                   `json:"weekly_capacity_minutes,omitempty" jsonschema:"每周计划投入的分钟数，用于复盘里的计划投入对比"`
 	StartDate             *string                `json:"start_date,omitempty" jsonschema:"计划开始日期，格式 YYYY-MM-DD"`
@@ -62,6 +66,8 @@ type QueryProgressOutput struct {
 type PlanProgress struct {
 	PlanID        string `json:"plan_id"`
 	Title         string `json:"title"`
+	Objective     string `json:"objective"`
+	Status        string `json:"status"`
 	Mode          string `json:"mode"`
 	DoneTasks     int    `json:"done_tasks"`
 	TotalTasks    int    `json:"total_tasks"`
@@ -149,6 +155,9 @@ func (h *MCPHandler) importPlanTree(ctx context.Context, req *mcp.CallToolReques
 		GoalID:                strings.TrimSpace(args.GoalID),
 		Title:                 args.Title,
 		Description:           args.Description,
+		Objective:             args.Objective,
+		SuccessCriteria:       args.SuccessCriteria,
+		TargetDate:            args.TargetDate,
 		Mode:                  strings.TrimSpace(args.Mode),
 		WeeklyCapacityMinutes: args.WeeklyCapacityMinutes,
 		StartDate:             args.StartDate,
@@ -243,7 +252,7 @@ func (h *MCPHandler) rescheduleTask(ctx context.Context, req *mcp.CallToolReques
 	if args.Version == 0 {
 		return nil, RescheduleTaskOutput{}, errors.New("version 必填：先用 query_progress 拿到任务当前的版本号")
 	}
-	input := UpdateTaskInput{Version: args.Version, ClearScheduledDate: args.ClearScheduledDate}
+	input := UpdateTaskInput{Version: args.Version, ClearScheduledDate: args.ClearScheduledDate, RequireCurrentPlan: true}
 	if args.ScheduledDate != nil {
 		if value := strings.TrimSpace(*args.ScheduledDate); value != "" {
 			input.ScheduledDate = &value
@@ -269,10 +278,13 @@ func (h *MCPHandler) rescheduleTask(ctx context.Context, req *mcp.CallToolReques
 // only is set, plans of other goals are skipped.
 func collectPlanProgress(goal *GoalNode, only string, into *[]PlanProgress) {
 	for _, plan := range goal.Plans {
+		if plan.Status != model.GoalStatusActive {
+			continue
+		}
 		if only != "" && plan.ID != only {
 			continue
 		}
-		entry := PlanProgress{PlanID: plan.ID, Title: plan.Title, Mode: plan.Mode, DoneTasks: plan.DoneTasks, TotalTasks: plan.TotalTasks}
+		entry := PlanProgress{PlanID: plan.ID, Title: plan.Title, Objective: plan.Objective, Status: plan.Status, Mode: plan.CurrentMode, DoneTasks: plan.DoneTasks, TotalTasks: plan.TotalTasks}
 		if plan.ActiveVersionNo != nil {
 			entry.ActiveVersion = fmt.Sprintf("V%d", *plan.ActiveVersionNo)
 		}
@@ -308,7 +320,7 @@ func toolError(action string, err error) error {
 		return fmt.Errorf("%s：这个幂等键已经用于另一份不同的内容。要么改用同一份内容重试，要么换一个新的键", action)
 	case errors.Is(err, ErrVersionConflict):
 		return fmt.Errorf("%s：任务版本已过期，可能已被其它操作修改，请重新查询后再试", action)
-	case errors.Is(err, ErrPlanVersionConflict), errors.Is(err, ErrConflict), errors.Is(err, ErrInvalidState):
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrInvalidState):
 		return fmt.Errorf("%s：当前状态不允许这个操作", action)
 	default:
 		return fmt.Errorf("%s：服务暂时不可用", action)

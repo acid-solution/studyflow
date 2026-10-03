@@ -31,30 +31,38 @@ const (
 )
 
 type Goal struct {
-	ID              string     `gorm:"type:char(36);primaryKey"`
-	UserID          string     `gorm:"type:char(36);not null;index"`
-	ParentGoalID    *string    `gorm:"type:char(36);index"`
-	Title           string     `gorm:"type:varchar(160);not null"`
-	Description     string     `gorm:"type:text;not null"`
-	SuccessCriteria string     `gorm:"type:text;not null"`
-	TargetDate      *time.Time `gorm:"type:date"`
-	Status          string     `gorm:"type:varchar(16);not null"`
-	Version         uint       `gorm:"not null"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                           string     `gorm:"type:char(36);primaryKey"`
+	UserID                       string     `gorm:"type:char(36);not null;index"`
+	ParentGoalID                 *string    `gorm:"type:char(36);index"`
+	Title                        string     `gorm:"type:varchar(160);not null"`
+	Description                  string     `gorm:"type:text;not null"`
+	SuccessCriteria              string     `gorm:"type:text;not null"`
+	TargetDate                   *time.Time `gorm:"type:date"`
+	Status                       string     `gorm:"type:varchar(16);not null"`
+	Version                      uint       `gorm:"not null"`
+	AchievedAt                   *time.Time
+	ExcludedFromParentCompletion bool `gorm:"not null"`
+	CreatedAt                    time.Time
+	UpdatedAt                    time.Time
 }
 
 type Plan struct {
-	ID              string  `gorm:"type:char(36);primaryKey"`
-	UserID          string  `gorm:"type:char(36);not null;index"`
-	GoalID          string  `gorm:"type:char(36);not null;index"`
-	ActiveVersionID *string `gorm:"type:char(36)"`
-	Title           string  `gorm:"type:varchar(160);not null"`
-	Description     string  `gorm:"type:text;not null"`
-	Mode            string  `gorm:"type:varchar(16);not null"`
-	Source          string  `gorm:"type:varchar(16);not null;default:user"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                         string     `gorm:"type:char(36);primaryKey"`
+	UserID                     string     `gorm:"type:char(36);not null;index"`
+	GoalID                     string     `gorm:"type:char(36);not null;index"`
+	ActiveVersionID            *string    `gorm:"type:char(36)"`
+	Title                      string     `gorm:"type:varchar(160);not null"`
+	Description                string     `gorm:"type:text;not null"`
+	Objective                  string     `gorm:"type:text;not null"`
+	SuccessCriteria            string     `gorm:"type:text;not null"`
+	TargetDate                 *time.Time `gorm:"type:date"`
+	Status                     string     `gorm:"type:varchar(16);not null;index"`
+	Revision                   uint       `gorm:"not null"`
+	AchievedAt                 *time.Time
+	ExcludedFromGoalCompletion bool   `gorm:"not null"`
+	Source                     string `gorm:"type:varchar(16);not null;default:user"`
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
 }
 
 type PlanVersion struct {
@@ -63,10 +71,11 @@ type PlanVersion struct {
 	PlanID                string     `gorm:"type:char(36);not null;index"`
 	VersionNo             uint       `gorm:"not null"`
 	Status                string     `gorm:"type:varchar(16);not null"`
+	Mode                  string     `gorm:"type:varchar(16);not null"`
 	WeeklyCapacityMinutes uint       `gorm:"not null"`
 	StartDate             *time.Time `gorm:"type:date"`
 	EndDate               *time.Time `gorm:"type:date"`
-	BaseVersionID         *string    `gorm:"type:char(36)"`
+	SourceVersionID       *string    `gorm:"column:base_version_id;type:char(36)"`
 	BaseStructureRevision uint       `gorm:"not null"`
 	StructureRevision     uint       `gorm:"not null"`
 	ActivatedAt           *time.Time

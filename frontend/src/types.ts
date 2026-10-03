@@ -2,19 +2,35 @@ export type PlanMode = 'calendar' | 'sequence'
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'canceled'
 // Who put a plan or task there: a person using the app, or an agent that imported it.
 export type TaskSource = 'user' | 'agent'
+export type EntityStatus = 'active' | 'achieved' | 'abandoned'
+
+export type PlanCompletionSummary = {
+  has_active_version: boolean
+  total_tasks: number
+  done_tasks: number
+  open_tasks: number
+}
 
 export type PlanSummary = {
   id: string
   goal_id: string
   title: string
   description: string
-  mode: PlanMode
+  objective: string
+  success_criteria: string
+  target_date: string | null
+  status: EntityStatus
+  revision: number
+  achieved_at: string | null
+  excluded_from_goal_completion: boolean
+  current_mode: PlanMode | ''
   source: TaskSource
   active_version_id: string | null
   active_version_no: number | null
   draft_version_id: string | null
   done_tasks: number
   total_tasks: number
+  completion_summary: PlanCompletionSummary
 }
 
 export type GoalNode = {
@@ -24,9 +40,12 @@ export type GoalNode = {
   description: string
   success_criteria: string
   target_date: string | null
-  status: 'active' | 'achieved' | 'abandoned'
+  status: EntityStatus
   version: number
+  achieved_at: string | null
+  excluded_from_parent_completion: boolean
   ready_to_complete: boolean
+  completion_summary: { included_children: number; achieved_children: number; incomplete_children: number; excluded_children: number }
   plans: PlanSummary[]
   children: GoalNode[]
 }
@@ -36,6 +55,7 @@ export type Task = {
   plan_id?: string
   plan_title?: string
   plan_mode?: PlanMode
+  plan_status?: EntityStatus
   version_status?: 'draft' | 'active' | 'superseded' | 'canceled'
   plan_version_id: string
   milestone_id: string | null
@@ -56,6 +76,8 @@ export type PlanVersion = {
   id: string
   version_no: number
   status: 'draft' | 'active' | 'superseded' | 'canceled'
+  mode: PlanMode
+  source_version_id: string | null
   weekly_capacity_minutes: number
   start_date: string | null
   end_date: string | null
@@ -64,7 +86,7 @@ export type PlanVersion = {
   unassigned_tasks: Task[]
 }
 export type PlanDetail = {
-  plan: { id: string; goal_id: string; active_version_id: string | null; title: string; description: string; mode: PlanMode; source: TaskSource; created_at: string }
+  plan: { id: string; goal_id: string; active_version_id: string | null; title: string; description: string; objective: string; success_criteria: string; target_date: string | null; status: EntityStatus; revision: number; achieved_at: string | null; excluded_from_goal_completion: boolean; completion_summary: PlanCompletionSummary; source: TaskSource; created_at: string }
   versions: PlanVersion[]
 }
 
@@ -100,6 +122,9 @@ export type ImportDraft = {
   goal_id?: string
   title: string
   description?: string
+  objective: string
+  success_criteria?: string
+  target_date?: string | null
   mode: PlanMode
   weekly_capacity_minutes?: number
   start_date?: string | null

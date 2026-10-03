@@ -8,7 +8,7 @@ import (
 
 // 统一响应体
 type APIResponse struct {
-	Code    int    `json:"code"`
+	Code    any    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data"`
 }
@@ -57,4 +57,12 @@ func FailUnauthorized(c *gin.Context, message string) {
 
 func FailConflict(c *gin.Context, message string) {
 	fail(c, http.StatusConflict, CodeConflict, message)
+}
+
+func FailConflictData(c *gin.Context, code, message string, data any) {
+	c.JSON(http.StatusConflict, APIResponse{
+		Code:    code,
+		Message: message,
+		Data:    data,
+	})
 }

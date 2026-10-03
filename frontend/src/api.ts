@@ -4,10 +4,12 @@ export const API_URL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8081'
 export class APIError extends Error {
   status: number
   code?: string | number
-  constructor(message: string, status: number, code?: string | number) {
+  data?: unknown
+  constructor(message: string, status: number, code?: string | number, data?: unknown) {
     super(message)
     this.status = status
     this.code = code
+    this.data = data
   }
 }
 
@@ -16,7 +18,7 @@ async function json<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
     const nested = body?.error
-    throw new APIError(nested?.message ?? body?.message ?? '请求失败', response.status, nested?.code ?? body?.code)
+    throw new APIError(nested?.message ?? body?.message ?? '请求失败', response.status, nested?.code ?? body?.code, nested?.data ?? body?.data)
   }
   return (body?.data ?? body) as T
 }

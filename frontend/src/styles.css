@@ -115,11 +115,15 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .goal-actions button:hover { color: var(--primary); background: var(--primary-soft); }
 .goal-plans { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 43px; }
 .goal-plans button { display: flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); background: var(--surface); font-size: 9px; }
+.goal-plans button > span { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; color: var(--text); }
+.goal-plans button small { max-width: 260px; overflow: hidden; color: var(--muted); font-size: 8px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .goal-plans button em { color: var(--primary); font-style: normal; }
 
 .status-badge { padding: 4px 7px; border-radius: 6px; font-size: 9px; }
 .status-badge.active { color: #24784e; background: #ebf7f0; }
 .status-badge.draft { color: #9a681b; background: #fff6df; }
+.status-badge.achieved { color: #24784e; background: #ebf7f0; }
+.status-badge.abandoned { color: #777d89; background: #eef0f4; }
 .version-tabs { display: flex; gap: 7px; margin-top: 22px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
 .version-tabs button { display: flex; align-items: center; gap: 7px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); background: var(--surface); }
 .version-tabs button span { font-size: 9px; }

@@ -167,7 +167,7 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 	}
 
 	var activePlans []model.Plan
-	if err := s.db.WithContext(ctx).Where("user_id = ? AND active_version_id IS NOT NULL", userID).Order("created_at").Find(&activePlans).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("user_id = ? AND status = ? AND active_version_id IS NOT NULL", userID, model.GoalStatusActive).Order("created_at").Find(&activePlans).Error; err != nil {
 		return nil, err
 	}
 	planIndex := map[string]int{}
@@ -209,7 +209,7 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 		PlanMode      string
 	}
 	var completed []completedRow
-	if err := s.db.WithContext(ctx).Table("tasks t").Select("t.completed_at, t.scheduled_date, p.id AS plan_id, p.mode AS plan_mode").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id").Where("t.user_id = ? AND t.status = ? AND t.completed_at >= ? AND t.completed_at < ?", userID, model.TaskStatusDone, startUTC, endUTC).Scan(&completed).Error; err != nil {
+	if err := s.db.WithContext(ctx).Table("tasks t").Select("t.completed_at, t.scheduled_date, p.id AS plan_id, pv.mode AS plan_mode").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id").Where("t.user_id = ? AND t.status = ? AND t.completed_at >= ? AND t.completed_at < ?", userID, model.TaskStatusDone, startUTC, endUTC).Scan(&completed).Error; err != nil {
 		return nil, err
 	}
 	review.CompletedTasks = len(completed)
@@ -224,7 +224,7 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 		CompletedAt   *time.Time
 	}
 	var scheduled []scheduledRow
-	if err := s.db.WithContext(ctx).Table("tasks t").Select("t.scheduled_date, t.completed_at").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id AND p.active_version_id = pv.id").Where("t.user_id = ? AND p.mode = ? AND t.status <> ? AND t.scheduled_date >= ? AND t.scheduled_date < ?", userID, model.PlanModeCalendar, model.TaskStatusCanceled, startLocal, endLocal).Scan(&scheduled).Error; err != nil {
+	if err := s.db.WithContext(ctx).Table("tasks t").Select("t.scheduled_date, t.completed_at").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id AND p.active_version_id = pv.id AND p.status = ?", model.GoalStatusActive).Where("t.user_id = ? AND pv.mode = ? AND t.status <> ? AND t.scheduled_date >= ? AND t.scheduled_date < ?", userID, model.PlanModeCalendar, model.TaskStatusCanceled, startLocal, endLocal).Scan(&scheduled).Error; err != nil {
 		return nil, err
 	}
 	review.ScheduledTasks = len(scheduled)
@@ -243,7 +243,7 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 
 	today := dateOnly(s.now().In(location))
 	var overdue int64
-	if err := s.db.WithContext(ctx).Table("tasks t").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id AND p.active_version_id = pv.id").Where("t.user_id = ? AND p.mode = ? AND t.status IN ? AND t.scheduled_date < ?", userID, model.PlanModeCalendar, []string{model.TaskStatusTodo, model.TaskStatusInProgress}, today).Count(&overdue).Error; err != nil {
+	if err := s.db.WithContext(ctx).Table("tasks t").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id AND p.active_version_id = pv.id AND p.status = ?", model.GoalStatusActive).Where("t.user_id = ? AND pv.mode = ? AND t.status IN ? AND t.scheduled_date < ?", userID, model.PlanModeCalendar, []string{model.TaskStatusTodo, model.TaskStatusInProgress}, today).Count(&overdue).Error; err != nil {
 		return nil, err
 	}
 	review.CurrentOverdue = int(overdue)

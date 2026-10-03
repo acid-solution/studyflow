@@ -116,6 +116,22 @@ function PageFrame({ eyebrow, title, description, action, children }: { eyebrow:
 
 function flattenGoals(nodes: GoalNode[], depth = 0): Array<{ goal: GoalNode; depth: number }> { return nodes.flatMap((goal) => [{ goal, depth }, ...flattenGoals(goal.children, depth + 1)]) }
 
+function completionWarning(reason: unknown, scope: 'goal' | 'plan') {
+  if (!(reason instanceof APIError) || reason.code !== 'completion_confirmation_required') return false
+  const summary = (reason.data ?? {}) as Record<string, number | boolean>
+  const detail = scope === 'goal'
+    ? `仍有 ${summary.incomplete_children ?? 0} 个直属子项未达成。`
+    : summary.has_active_version
+      ? `当前版本还有 ${summary.open_tasks ?? 0} 个任务未完成。`
+      : '这份计划还没有生效版本。'
+  return window.confirm(`${detail}\n\n系统只提供进度提醒。是否仍确认目标已经达成？`)
+}
+
+function chooseParentEffect(label: string) {
+  const value = window.prompt(`放弃“${label}”后如何影响上层？\n输入 block：继续阻塞上层完成\n输入 exclude：从上层判断中排除`, 'block')
+  return value === 'block' || value === 'exclude' ? value : null
+}
+
 function GoalsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: string) => void }) {
   const { data, error, reload } = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token])
   const [editing, setEditing] = useState<GoalNode | null>(null)
@@ -123,6 +139,7 @@ function GoalsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: stri
   const [title, setTitle] = useState('')
   const [criteria, setCriteria] = useState('')
   const [showForm, setShowForm] = useState(false)
+  const [notice, setNotice] = useState('')
   const all = flattenGoals(data ?? [])
   const reset = () => { setEditing(null); setParentID(''); setTitle(''); setCriteria(''); setShowForm(false) }
   const submit = async (event: FormEvent) => {
@@ -133,18 +150,33 @@ function GoalsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: stri
   }
   const beginEdit = (goal: GoalNode) => { setEditing(goal); setTitle(goal.title); setCriteria(goal.success_criteria); setParentID(goal.parent_goal_id ?? ''); setShowForm(true) }
   const addChild = (goal: GoalNode) => { reset(); setParentID(goal.id); setShowForm(true) }
-  const complete = async (goal: GoalNode) => { await api(token, `/goals/${goal.id}/complete`, { method: 'POST' }); await reload() }
-  const abandon = async (goal: GoalNode) => { await api(token, `/goals/${goal.id}/abandon`, { method: 'POST' }); await reload() }
+  const run = async (job: () => Promise<unknown>) => { setNotice(''); try { await job(); await reload() } catch (reason) { setNotice(messageOf(reason)) } }
+  const complete = async (goal: GoalNode) => {
+    try { await api(token, `/goals/${goal.id}/complete`, { method: 'POST' }) }
+    catch (reason) {
+      if (!completionWarning(reason, 'goal')) { setNotice(messageOf(reason)); return }
+      await api(token, `/goals/${goal.id}/complete`, { method: 'POST', body: JSON.stringify({ acknowledge_incomplete: true }) })
+    }
+    await reload()
+  }
+  const abandon = async (goal: GoalNode) => {
+    const effect = goal.parent_goal_id ? chooseParentEffect(goal.title) : ''
+    if (goal.parent_goal_id && !effect) return
+    await run(() => api(token, `/goals/${goal.id}/abandon`, { method: 'POST', body: JSON.stringify({ parent_effect: effect }) }))
+  }
+  const reopen = (goal: GoalNode) => run(() => api(token, `/goals/${goal.id}/reopen`, { method: 'POST' }))
+  const togglePolicy = (goal: GoalNode) => run(() => api(token, `/goals/${goal.id}/completion-policy`, { method: 'PATCH', body: JSON.stringify({ parent_effect: goal.excluded_from_parent_completion ? 'block' : 'exclude' }) }))
   return <PageFrame eyebrow="目标树" title="把长期目标逐层拆开" description="目标可以继续拆成分目标，计划可挂在任意一级。" action={<button className="button button-primary" onClick={() => { reset(); setShowForm(true) }}><Plus size={16} />新建目标</button>}>
     {showForm && <form className="inline-editor" onSubmit={submit}><div><strong>{editing ? '编辑目标' : '新建目标'}</strong><span>父目标为空时创建根目标</span></div><input required placeholder="目标名称" value={title} onChange={(event) => setTitle(event.target.value)} /><input placeholder="完成标准" value={criteria} onChange={(event) => setCriteria(event.target.value)} /><select value={parentID} onChange={(event) => setParentID(event.target.value)}><option value="">根目标</option>{all.filter((item) => item.goal.id !== editing?.id).map(({ goal, depth }) => <option key={goal.id} value={goal.id}>{'　'.repeat(depth)}{goal.title}</option>)}</select><button className="button button-primary">保存</button><button className="button" type="button" onClick={reset}>取消</button></form>}
-    {!data ? <LoadingBlock error={error} /> : <section className="goal-tree">{data.length ? data.map((goal) => <GoalBranch key={goal.id} goal={goal} depth={0} onEdit={beginEdit} onAdd={addChild} onComplete={complete} onAbandon={abandon} onOpenPlan={onOpenPlan} />) : <div className="empty-plans"><Flag size={26} /><strong>还没有目标</strong><span>先创建一个真正想达成的长期目标。</span></div>}</section>}
+    {notice && <p className="drawer-error">{notice}</p>}
+    {!data ? <LoadingBlock error={error} /> : <section className="goal-tree">{data.length ? data.map((goal) => <GoalBranch key={goal.id} goal={goal} depth={0} onEdit={beginEdit} onAdd={addChild} onComplete={complete} onAbandon={abandon} onReopen={reopen} onTogglePolicy={togglePolicy} onOpenPlan={onOpenPlan} />) : <div className="empty-plans"><Flag size={26} /><strong>还没有目标</strong><span>先创建一个真正想达成的长期目标。</span></div>}</section>}
   </PageFrame>
 }
 
-function GoalBranch({ goal, depth, onEdit, onAdd, onComplete, onAbandon, onOpenPlan }: { goal: GoalNode; depth: number; onEdit: (goal: GoalNode) => void; onAdd: (goal: GoalNode) => void; onComplete: (goal: GoalNode) => void; onAbandon: (goal: GoalNode) => void; onOpenPlan: (id: string) => void }) {
-  return <article className="goal-node" style={{ marginLeft: `${Math.min(depth, 5) * 24}px` }}><div className="goal-card"><span className={goal.status === 'achieved' ? 'goal-state achieved' : 'goal-state'}>{goal.status === 'achieved' ? <Check size={14} /> : <Target size={14} />}</span><div className="goal-copy"><strong>{goal.title}</strong><span>{goal.success_criteria || '尚未填写完成标准'}</span>{goal.ready_to_complete && <em>分目标和计划均已完成，可以检查目标</em>}</div><div className="goal-actions"><button onClick={() => onAdd(goal)}>新增分目标</button><button onClick={() => onEdit(goal)}>编辑</button>{goal.status === 'active' && <><button onClick={() => onComplete(goal)}>确认完成</button><button onClick={() => onAbandon(goal)}>放弃</button></>}</div></div>
-    {goal.plans.length > 0 && <div className="goal-plans">{goal.plans.map((plan) => <button key={plan.id} onClick={() => onOpenPlan(plan.id)}><Route size={14} /><span>{plan.title}</span><em>{plan.done_tasks}/{plan.total_tasks}</em></button>)}</div>}
-    {goal.children.map((child) => <GoalBranch key={child.id} goal={child} depth={depth + 1} onEdit={onEdit} onAdd={onAdd} onComplete={onComplete} onAbandon={onAbandon} onOpenPlan={onOpenPlan} />)}
+function GoalBranch({ goal, depth, onEdit, onAdd, onComplete, onAbandon, onReopen, onTogglePolicy, onOpenPlan }: { goal: GoalNode; depth: number; onEdit: (goal: GoalNode) => void; onAdd: (goal: GoalNode) => void; onComplete: (goal: GoalNode) => void; onAbandon: (goal: GoalNode) => void; onReopen: (goal: GoalNode) => void; onTogglePolicy: (goal: GoalNode) => void; onOpenPlan: (id: string) => void }) {
+  return <article className="goal-node" style={{ marginLeft: `${Math.min(depth, 5) * 24}px` }}><div className="goal-card"><span className={goal.status === 'achieved' ? 'goal-state achieved' : 'goal-state'}>{goal.status === 'achieved' ? <Check size={14} /> : <Target size={14} />}</span><div className="goal-copy"><strong>{goal.title}</strong><span>{goal.success_criteria || '尚未填写完成标准'} · {goal.status === 'active' ? '进行中' : goal.status === 'achieved' ? '已达成' : goal.excluded_from_parent_completion ? '已放弃（不计入上层）' : '已放弃（仍阻塞上层）'}</span>{goal.ready_to_complete && <em>所有必要子项已达成，可以确认完成</em>}{goal.status === 'active' && <em>{goal.completion_summary.achieved_children}/{goal.completion_summary.included_children} 个必要子项已达成</em>}</div><div className="goal-actions">{goal.status === 'active' ? <><button onClick={() => onAdd(goal)}>新增分目标</button><button onClick={() => onEdit(goal)}>编辑</button><button onClick={() => onComplete(goal)}>确认完成</button><button onClick={() => onAbandon(goal)}>放弃</button></> : <><button onClick={() => onReopen(goal)}>恢复</button>{goal.status === 'abandoned' && goal.parent_goal_id && <button onClick={() => onTogglePolicy(goal)}>{goal.excluded_from_parent_completion ? '改为阻塞上层' : '改为排除'}</button>}</>}</div></div>
+    {goal.plans.length > 0 && <div className="goal-plans">{goal.plans.map((plan) => <button key={plan.id} onClick={() => onOpenPlan(plan.id)}><Route size={14} /><span>{plan.title}<small>{plan.objective}</small></span><em>{plan.status === 'active' ? `${plan.done_tasks}/${plan.total_tasks}` : plan.status === 'achieved' ? '已达成' : '已放弃'}</em></button>)}</div>}
+    {goal.children.map((child) => <GoalBranch key={child.id} goal={child} depth={depth + 1} onEdit={onEdit} onAdd={onAdd} onComplete={onComplete} onAbandon={onAbandon} onReopen={onReopen} onTogglePolicy={onTogglePolicy} onOpenPlan={onOpenPlan} />)}
   </article>
 }
 
@@ -154,14 +186,17 @@ function PlansPage({ token, onOpen }: { token: string; onOpen: (id: string) => v
   const [showForm, setShowForm] = useState(false)
   const [goalID, setGoalID] = useState('')
   const [title, setTitle] = useState('')
+  const [objective, setObjective] = useState('')
+  const [criteria, setCriteria] = useState('')
+  const [targetDate, setTargetDate] = useState('')
   const [mode, setMode] = useState<PlanMode>('calendar')
   const [capacity, setCapacity] = useState(600)
-  const flat = flattenGoals(goals.data ?? [])
+  const flat = flattenGoals(goals.data ?? []).filter(({ goal }) => goal.status === 'active')
   useEffect(() => { if (!goalID && flat[0]) setGoalID(flat[0].goal.id) }, [goalID, flat])
-  const create = async (event: FormEvent) => { event.preventDefault(); const value = await api<PlanDetail>(token, `/goals/${goalID}/plans`, { method: 'POST', body: JSON.stringify({ title, mode, weekly_capacity_minutes: capacity }) }); setShowForm(false); await plans.reload(); onOpen(value.plan.id) }
+  const create = async (event: FormEvent) => { event.preventDefault(); const value = await api<PlanDetail>(token, `/goals/${goalID}/plans`, { method: 'POST', body: JSON.stringify({ title, objective, success_criteria: criteria, target_date: targetDate || undefined, mode, weekly_capacity_minutes: capacity }) }); setShowForm(false); await plans.reload(); onOpen(value.plan.id) }
   return <PageFrame eyebrow="学习计划" title="多个计划可以同步进行" description="按日期安排到天，按课时计划依次推进。" action={<button className="button button-primary" onClick={() => setShowForm(true)} disabled={!flat.length}><Plus size={16} />新建计划</button>}>
-    {showForm && <form className="inline-editor" onSubmit={create}><div><strong>创建计划草稿</strong><span>激活前可以完整编辑结构</span></div><input required placeholder="计划名称" value={title} onChange={(event) => setTitle(event.target.value)} /><select value={goalID} onChange={(event) => setGoalID(event.target.value)}>{flat.map(({ goal, depth }) => <option key={goal.id} value={goal.id}>{'　'.repeat(depth)}{goal.title}</option>)}</select><select value={mode} onChange={(event) => setMode(event.target.value as PlanMode)}><option value="calendar">按日期</option><option value="sequence">按课时</option></select><input type="number" min="0" value={capacity} onChange={(event) => setCapacity(Number(event.target.value))} aria-label="每周计划分钟数" /><button className="button button-primary">创建</button><button className="button" type="button" onClick={() => setShowForm(false)}>取消</button></form>}
-    {!plans.data ? <LoadingBlock error={plans.error || goals.error} /> : <div className="plan-card-grid">{plans.data.map((plan) => <article className="plan-card" key={plan.id}><div className="plan-card-head"><span className="plan-type">{plan.mode === 'calendar' ? <CalendarDays size={13} /> : <BookOpen size={13} />}{plan.mode === 'calendar' ? '按日期' : '按课时'}</span><SourceBadge source={plan.source} /><span className={plan.active_version_id ? 'status-badge active' : 'status-badge draft'}>{plan.active_version_id ? `V${plan.active_version_no} 进行中` : '草稿'}</span></div><h2>{plan.title}</h2><p className="plan-description">{plan.description || '尚未填写计划说明。'}</p><div className="plan-progress-copy"><span>任务完成</span><strong>{plan.done_tasks} / {plan.total_tasks}</strong></div><div className="progress-track"><span style={{ width: `${plan.total_tasks ? plan.done_tasks / plan.total_tasks * 100 : 0}%` }} /></div>{plan.draft_version_id && <div className="plan-next"><span>待处理</span><strong>存在尚未激活的新版本草稿</strong></div>}<button className="button plan-open-button" onClick={() => onOpen(plan.id)}>查看计划 <ChevronRight size={15} /></button></article>)}</div>}
+    {showForm && <form className="inline-editor" onSubmit={create}><div><strong>创建计划草稿</strong><span>计划目标必填，V1 可在激活前调整</span></div><input required placeholder="计划名称" value={title} onChange={(event) => setTitle(event.target.value)} /><input required placeholder="完成计划后要达成什么目标" value={objective} onChange={(event) => setObjective(event.target.value)} /><input placeholder="完成标准（可选）" value={criteria} onChange={(event) => setCriteria(event.target.value)} /><input type="date" aria-label="计划目标日期" value={targetDate} onChange={(event) => setTargetDate(event.target.value)} /><select value={goalID} onChange={(event) => setGoalID(event.target.value)}>{flat.map(({ goal, depth }) => <option key={goal.id} value={goal.id}>{'　'.repeat(depth)}{goal.title}</option>)}</select><select value={mode} onChange={(event) => setMode(event.target.value as PlanMode)}><option value="calendar">按日期</option><option value="sequence">按课时</option></select><input type="number" min="0" value={capacity} onChange={(event) => setCapacity(Number(event.target.value))} aria-label="每周计划分钟数" /><button className="button button-primary">创建</button><button className="button" type="button" onClick={() => setShowForm(false)}>取消</button></form>}
+    {!plans.data ? <LoadingBlock error={plans.error || goals.error} /> : <div className="plan-card-grid">{plans.data.map((plan) => <article className="plan-card" key={plan.id}><div className="plan-card-head"><span className="plan-type">{plan.current_mode === 'sequence' ? <BookOpen size={13} /> : <CalendarDays size={13} />}{plan.current_mode === 'sequence' ? '按课时' : plan.current_mode === 'calendar' ? '按日期' : '未设置模式'}</span><SourceBadge source={plan.source} /><span className={plan.status === 'achieved' ? 'status-badge achieved' : plan.status === 'abandoned' ? 'status-badge abandoned' : plan.active_version_id ? 'status-badge active' : 'status-badge draft'}>{plan.status === 'achieved' ? '已达成' : plan.status === 'abandoned' ? '已放弃' : plan.active_version_id ? `V${plan.active_version_no} 进行中` : '草稿'}</span></div><h2>{plan.title}</h2><p className="plan-description"><strong>目标：</strong>{plan.objective}</p><div className="plan-progress-copy"><span>当前版本任务</span><strong>{plan.done_tasks} / {plan.total_tasks}</strong></div><div className="progress-track"><span style={{ width: `${plan.total_tasks ? plan.done_tasks / plan.total_tasks * 100 : 0}%` }} /></div>{plan.draft_version_id && <div className="plan-next"><span>待处理</span><strong>存在尚未激活的新版本草稿</strong></div>}<button className="button plan-open-button" onClick={() => onOpen(plan.id)}>查看计划 <ChevronRight size={15} /></button></article>)}</div>}
   </PageFrame>
 }
 
@@ -172,18 +207,52 @@ function PlanDetailPage({ token, planID, onOpenTask }: { token: string; planID: 
   const [taskTitle, setTaskTitle] = useState('')
   const [taskMilestone, setTaskMilestone] = useState('')
   const [taskDate, setTaskDate] = useState('')
+  const [notice, setNotice] = useState('')
   useEffect(() => { if (data) { const preferred = data.versions.find((version) => version.status === 'draft') ?? data.versions.find((version) => version.status === 'active') ?? data.versions[0]; setSelectedID(preferred?.id ?? '') } }, [data])
   if (!data) return <PageFrame eyebrow="计划详情" title="读取计划" description="正在加载版本和任务树。"><LoadingBlock error={error} /></PageFrame>
   const selected = data.versions.find((version) => version.id === selectedID) ?? data.versions[0]
-  const addMilestone = async (event: FormEvent) => { event.preventDefault(); await api(token, `/plan-versions/${selected.id}/milestones`, { method: 'POST', body: JSON.stringify({ title: milestoneTitle }) }); setMilestoneTitle(''); await reload() }
-  const addTask = async (event: FormEvent) => { event.preventDefault(); await api(token, `/plan-versions/${selected.id}/tasks`, { method: 'POST', body: JSON.stringify({ title: taskTitle, milestone_id: taskMilestone || undefined, scheduled_date: data.plan.mode === 'calendar' && taskDate ? taskDate : undefined, estimate_minutes: 60 }) }); setTaskTitle(''); setTaskDate(''); await reload() }
-  const activate = async () => { await api(token, `/plan-versions/${selected.id}/activate`, { method: 'POST' }); await reload() }
-  const clone = async () => { const version = await api<PlanVersion>(token, `/plans/${data.plan.id}/versions`, { method: 'POST' }); await reload(); setSelectedID(version.id) }
-  return <PageFrame eyebrow={data.plan.mode === 'calendar' ? '按日期计划' : '按课时计划'} title={data.plan.title} description={data.plan.description || '通过版本草稿调整结构，激活后进入执行。'} action={<div className="topbar-actions">{data.plan.active_version_id && !data.versions.some((version) => version.status === 'draft') && <button className="button" onClick={clone}><Plus size={15} />创建新版本</button>}{selected?.status === 'draft' && <button className="button button-primary" onClick={activate}>激活 V{selected.version_no}</button>}</div>}>
-    <div className="version-tabs">{data.versions.map((version) => <button key={version.id} className={version.id === selected.id ? 'is-current' : ''} onClick={() => setSelectedID(version.id)}>V{version.version_no}<span>{version.status === 'draft' ? '草稿' : version.status === 'active' ? '生效中' : '历史'}</span></button>)}</div>
-    {selected.status === 'draft' && <form className="quick-add" onSubmit={addMilestone}><div><strong>新增阶段</strong><span>把计划拆成有明确结果的阶段</span></div><input required value={milestoneTitle} onChange={(event) => setMilestoneTitle(event.target.value)} placeholder="阶段名称" /><span /><button className="button button-primary">添加</button></form>}
-    {(selected.status === 'draft' || selected.status === 'active') && <form className="quick-add" onSubmit={addTask}><div><strong>新增任务</strong><span>{selected.status === 'active' ? '新任务会立即进入当前计划' : '任务可暂时不归入阶段'}</span></div><input required value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="任务名称" /><select value={taskMilestone} onChange={(event) => setTaskMilestone(event.target.value)}><option value="">未分阶段</option>{selected.milestones.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select>{data.plan.mode === 'calendar' && <input type="date" value={taskDate} onChange={(event) => setTaskDate(event.target.value)} />}<button className="button button-primary">添加</button></form>}
-    <section className="detail-layout"><div className="detail-main"><Unassigned tasks={selected.unassigned_tasks} onOpen={(task) => onOpenTask({ ...task, plan_id: data.plan.id, plan_title: data.plan.title, plan_mode: data.plan.mode, version_status: selected.status }, reload)} /><div className="stage-list">{selected.milestones.map((milestone) => <MilestoneCard key={milestone.id} milestone={milestone} onOpen={(task) => onOpenTask({ ...task, plan_id: data.plan.id, plan_title: data.plan.title, plan_mode: data.plan.mode, version_status: selected.status }, reload)} />)}</div></div><aside className="detail-aside"><section><h3>版本信息</h3><dl><div><dt>版本</dt><dd>V{selected.version_no}</dd></div><div><dt>状态</dt><dd>{selected.status}</dd></div><div><dt>每周投入</dt><dd>{minutes(selected.weekly_capacity_minutes)}</dd></div></dl></section></aside></section>
+  const run = async (job: () => Promise<unknown>) => { setNotice(''); try { await job(); await reload() } catch (reason) { setNotice(messageOf(reason)) } }
+  const addMilestone = async (event: FormEvent) => { event.preventDefault(); await run(async () => { await api(token, `/plan-versions/${selected.id}/milestones`, { method: 'POST', body: JSON.stringify({ title: milestoneTitle }) }); setMilestoneTitle('') }) }
+  const addTask = async (event: FormEvent) => { event.preventDefault(); await run(async () => { await api(token, `/plan-versions/${selected.id}/tasks`, { method: 'POST', body: JSON.stringify({ title: taskTitle, milestone_id: taskMilestone || undefined, scheduled_date: selected.mode === 'calendar' && taskDate ? taskDate : undefined, estimate_minutes: 60 }) }); setTaskTitle(''); setTaskDate('') }) }
+  const activate = () => run(() => api(token, `/plan-versions/${selected.id}/activate`, { method: 'POST' }))
+  const createVersion = async (creationMode: 'blank' | 'copy') => {
+    if (creationMode === 'blank') {
+      const chosen = window.prompt('空白版本使用哪种推进模式？输入 calendar 或 sequence', selected.mode)
+      if (chosen !== 'calendar' && chosen !== 'sequence') return
+      const version = await api<PlanVersion>(token, `/plans/${data.plan.id}/versions`, { method: 'POST', body: JSON.stringify({ creation_mode: 'blank', mode: chosen, weekly_capacity_minutes: selected.weekly_capacity_minutes }) })
+      await reload(); setSelectedID(version.id); return
+    }
+    const version = await api<PlanVersion>(token, `/plans/${data.plan.id}/versions`, { method: 'POST', body: JSON.stringify({ creation_mode: 'copy', source_version_id: selected.id }) })
+    await reload(); setSelectedID(version.id)
+  }
+  const editVersion = async () => {
+    const chosen = window.prompt('推进模式：calendar 或 sequence', selected.mode)
+    if (chosen !== 'calendar' && chosen !== 'sequence') return
+    const capacity = window.prompt('每周投入分钟数', String(selected.weekly_capacity_minutes))
+    if (capacity === null || Number.isNaN(Number(capacity)) || Number(capacity) < 0) return
+    await run(() => api(token, `/plan-versions/${selected.id}`, { method: 'PATCH', body: JSON.stringify({ mode: chosen, weekly_capacity_minutes: Number(capacity) }) }))
+  }
+  const complete = async () => {
+    try { await api(token, `/plans/${data.plan.id}/complete`, { method: 'POST' }) }
+    catch (reason) {
+      if (!completionWarning(reason, 'plan')) { setNotice(messageOf(reason)); return }
+      await api(token, `/plans/${data.plan.id}/complete`, { method: 'POST', body: JSON.stringify({ acknowledge_incomplete: true }) })
+    }
+    await reload()
+  }
+  const abandon = async () => { const effect = chooseParentEffect(data.plan.title); if (effect) await run(() => api(token, `/plans/${data.plan.id}/abandon`, { method: 'POST', body: JSON.stringify({ parent_effect: effect }) })) }
+  const reopen = () => run(() => api(token, `/plans/${data.plan.id}/reopen`, { method: 'POST' }))
+  const togglePolicy = () => run(() => api(token, `/plans/${data.plan.id}/completion-policy`, { method: 'PATCH', body: JSON.stringify({ parent_effect: data.plan.excluded_from_goal_completion ? 'block' : 'exclude' }) }))
+  const hasDraft = data.versions.some((version) => version.status === 'draft')
+  const canEditTasks = data.plan.status === 'active' && (selected.status === 'draft' || selected.status === 'active')
+  return <PageFrame eyebrow={selected.mode === 'calendar' ? '按日期版本' : '按课时版本'} title={data.plan.title} description={data.plan.description || '每个版本是一套独立方案，切换不会合并进度。'} action={<div className="topbar-actions">{data.plan.status === 'active' ? <><button className="button" onClick={complete}>确认达成</button><button className="button" onClick={abandon}>放弃计划</button></> : <><button className="button button-primary" onClick={reopen}>恢复计划</button>{data.plan.status === 'abandoned' && <button className="button" onClick={togglePolicy}>{data.plan.excluded_from_goal_completion ? '改为阻塞上层' : '改为从上层排除'}</button>}</>}</div>}>
+    <section className="summary-strip"><div><span>计划目标</span><strong>{data.plan.objective}</strong></div><div><span>完成标准</span><strong>{data.plan.success_criteria || '由你最终判断'}</strong></div><div><span>目标日期</span><strong>{data.plan.target_date || '未设置'}</strong></div><div><span>计划状态</span><strong>{data.plan.status === 'active' ? '进行中' : data.plan.status === 'achieved' ? '已达成' : '已放弃'}</strong></div></section>
+    {notice && <p className="drawer-error">{notice}</p>}
+    <div className="version-tabs">{data.versions.map((version) => <button key={version.id} className={version.id === selected.id ? 'is-current' : ''} onClick={() => setSelectedID(version.id)}>V{version.version_no}<span>{version.status === 'draft' ? '草稿' : version.status === 'active' ? '当前版本' : version.status === 'canceled' ? '已取消' : '历史只读'}</span></button>)}</div>
+    {data.plan.status === 'active' && <div className="topbar-actions">{!hasDraft && <><button className="button" onClick={() => void createVersion('blank')}><Plus size={15} />空白版本</button><button className="button" onClick={() => void createVersion('copy')}>以 V{selected.version_no} 为模板</button></>}{selected.status === 'draft' && <><button className="button" onClick={editVersion}>编辑版本设置</button><button className="button" onClick={() => run(() => api(token, `/plan-versions/${selected.id}/cancel`, { method: 'POST' }))}>取消草稿</button><button className="button button-primary" onClick={activate}>激活 V{selected.version_no}</button></>}{selected.status === 'superseded' && <button className="button button-primary" onClick={activate}>切换到 V{selected.version_no}</button>}</div>}
+    {data.plan.status === 'active' && selected.status === 'draft' && <form className="quick-add" onSubmit={addMilestone}><div><strong>新增阶段</strong><span>把计划拆成有明确结果的阶段</span></div><input required value={milestoneTitle} onChange={(event) => setMilestoneTitle(event.target.value)} placeholder="阶段名称" /><span /><button className="button button-primary">添加</button></form>}
+    {canEditTasks && <form className="quick-add" onSubmit={addTask}><div><strong>新增任务</strong><span>{selected.status === 'active' ? '新任务会立即进入当前计划' : '任务可暂时不归入阶段'}</span></div><input required value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="任务名称" /><select value={taskMilestone} onChange={(event) => setTaskMilestone(event.target.value)}><option value="">未分阶段</option>{selected.milestones.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select>{selected.mode === 'calendar' && <input type="date" value={taskDate} onChange={(event) => setTaskDate(event.target.value)} />}<button className="button button-primary">添加</button></form>}
+    <section className="detail-layout"><div className="detail-main"><Unassigned tasks={selected.unassigned_tasks} onOpen={(task) => onOpenTask({ ...task, plan_id: data.plan.id, plan_title: data.plan.title, plan_mode: selected.mode, plan_status: data.plan.status, version_status: selected.status }, reload)} /><div className="stage-list">{selected.milestones.map((milestone) => <MilestoneCard key={milestone.id} milestone={milestone} onOpen={(task) => onOpenTask({ ...task, plan_id: data.plan.id, plan_title: data.plan.title, plan_mode: selected.mode, plan_status: data.plan.status, version_status: selected.status }, reload)} />)}</div></div><aside className="detail-aside"><section><h3>版本信息</h3><dl><div><dt>版本</dt><dd>V{selected.version_no}</dd></div><div><dt>状态</dt><dd>{selected.status}</dd></div><div><dt>推进方式</dt><dd>{selected.mode === 'calendar' ? '按日期' : '按课时'}</dd></div><div><dt>每周投入</dt><dd>{minutes(selected.weekly_capacity_minutes)}</dd></div><div><dt>模板来源</dt><dd>{selected.source_version_id ? `版本 ${data.versions.find((item) => item.id === selected.source_version_id)?.version_no ?? '历史'}` : '空白创建'}</dd></div></dl></section>{selected.status === 'superseded' && <p className="muted-copy">历史版本只读；切换为当前版本后才能继续执行。</p>}</aside></section>
   </PageFrame>
 }
 
@@ -222,6 +291,8 @@ function SettingsPage({ token, account, onLogout }: { token: string; account: Ac
 const sampleDraft = `{
   "title": "示例：三周复习计划",
   "description": "由 JobPilot 生成、用户确认后导入。",
+  "objective": "完成三周复习并通过一轮自测",
+  "success_criteria": "全部核心任务完成并完成复盘",
   "mode": "calendar",
   "weekly_capacity_minutes": 300,
   "milestones": [
@@ -260,27 +331,30 @@ function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: st
   const [result, setResult] = useState<PlanImportResult | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const all = flattenGoals(goals.data ?? [])
+  const all = flattenGoals(goals.data ?? []).filter(({ goal }) => goal.status === 'active')
   useEffect(() => { if (!goalID && all[0]) setGoalID(all[0].goal.id) }, [goalID, all])
 
   // 改草稿或换目标都作废幂等键：同一份输入再点一次确认是重放，输入变了才算新的一次导入。
   const editDraft = (value: string) => { setDraft(value); setKey(''); setResult(null); setError('') }
   const changeGoal = (value: string) => { setGoalID(value); setKey(''); setResult(null); setError('') }
 
-  let preview: { title: string; mode: string; milestones: number; tasks: number } | null = null
+  let preview: { title: string; objective: string; criteria: string; mode: string; milestones: number; tasks: number } | null = null
   let parseError = ''
   if (draft.trim()) {
     try {
       const value = JSON.parse(draft) as ImportDraft
       const milestones = Array.isArray(value.milestones) ? value.milestones : []
       const loose = Array.isArray(value.tasks) ? value.tasks : []
+      if (!(value.title ?? '').trim() || !(value.objective ?? '').trim()) throw new Error('missing_required_fields')
       preview = {
         title: (value.title ?? '').trim() || '（未命名）',
+        objective: (value.objective ?? '').trim() || '（缺少计划目标）',
+        criteria: (value.success_criteria ?? '').trim() || '未设置，由用户判断',
         mode: value.mode === 'sequence' ? '按课时' : '按日期',
         milestones: milestones.length,
         tasks: milestones.reduce((sum, item) => sum + (Array.isArray(item?.tasks) ? item.tasks.length : 0), 0) + loose.length,
       }
-    } catch { parseError = '草稿不是合法的 JSON。' }
+    } catch (reason) { parseError = reason instanceof Error && reason.message === 'missing_required_fields' ? '计划名称和计划目标都必须填写。' : '草稿不是合法的 JSON。' }
   }
 
   const confirm = async () => {
@@ -312,7 +386,7 @@ function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: st
           </select>
         </label>
         <label><span>路线草稿（JSON）</span>
-          <textarea value={draft} onChange={(event) => editDraft(event.target.value)} rows={16} spellCheck={false} placeholder='{"title": "…", "mode": "calendar", "milestones": []}' />
+          <textarea value={draft} onChange={(event) => editDraft(event.target.value)} rows={16} spellCheck={false} placeholder='{"title": "…", "objective": "…", "mode": "calendar", "milestones": []}' />
         </label>
         <div className="import-actions">
           <button className="button" type="button" onClick={() => editDraft(sampleDraft)}>填入示例</button>
@@ -328,6 +402,8 @@ function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: st
           <h2>将创建的内容</h2>
           {!preview ? <p className="muted-copy">粘贴草稿后这里会显示摘要。</p> : <dl className="import-summary">
             <div><dt>计划</dt><dd>{preview.title}</dd></div>
+            <div><dt>计划目标</dt><dd>{preview.objective}</dd></div>
+            <div><dt>完成标准</dt><dd>{preview.criteria}</dd></div>
             <div><dt>模式</dt><dd>{preview.mode}</dd></div>
             <div><dt>阶段</dt><dd>{preview.milestones}</dd></div>
             <div><dt>任务</dt><dd>{preview.tasks}</dd></div>
@@ -368,10 +444,11 @@ function TaskDrawer({ token, task, running, onClose, onChanged }: { token: strin
   const [sessionNote, setSessionNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
-  const execute = async (job: () => Promise<unknown>) => { setBusy(true); setNotice(''); try { await job(); onChanged() } catch (reason) { setNotice(messageOf(reason)) } finally { setBusy(false) } }
-  const save = () => execute(() => api(token, `/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({ version: task.version, title, description, estimate_minutes: estimate, scheduled_date: date || undefined, clear_scheduled_date: !date }) }))
   const isRunning = running?.task_id === task.id
-  const isDraft = task.version_status === 'draft'
+  const isReadOnly = task.plan_status === 'achieved' || task.plan_status === 'abandoned' || task.version_status === 'superseded' || task.version_status === 'canceled'
+  const isDraft = task.version_status === 'draft' && !isReadOnly
+  const execute = async (job: () => Promise<unknown>) => { if (isReadOnly) { setNotice('历史版本和已结束计划只读；请先切换版本或恢复计划。'); return } setBusy(true); setNotice(''); try { await job(); onChanged() } catch (reason) { setNotice(messageOf(reason)) } finally { setBusy(false) } }
+  const save = () => execute(() => api(token, `/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({ version: task.version, title, description, estimate_minutes: estimate, scheduled_date: date || undefined, clear_scheduled_date: !date }) }))
   return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="task-drawer"><div className="drawer-head"><div><span>任务详情</span><strong>{task.plan_title || '学习计划'}</strong></div><button onClick={onClose}><X size={18} /></button></div><div className="drawer-body"><div className="drawer-status-row"><span className="plan-badge tone-blue">{task.plan_mode === 'sequence' ? '按课时' : '按日期'}</span><span className={task.is_overdue ? 'task-state is-overdue' : task.status === 'done' ? 'task-state is-done' : 'task-state'}>{isDraft ? '草稿任务' : task.is_overdue ? '已逾期' : task.status}</span></div><input className="drawer-title-input" value={title} onChange={(event) => setTitle(event.target.value)} /><div className="drawer-fields"><label><span>安排日期</span><input type="date" disabled={task.plan_mode === 'sequence'} value={date} onChange={(event) => setDate(event.target.value)} /></label><label><span>预计投入（分钟）</span><input type="number" min="0" value={estimate} onChange={(event) => setEstimate(Number(event.target.value))} /></label><label><span>版本</span><strong>{task.version}</strong></label><label><span>状态</span><strong>{isDraft ? '尚未激活' : task.status}</strong></label></div><section className="drawer-section"><h3>任务说明</h3><textarea value={description} onChange={(event) => setDescription(event.target.value)} /></section>{!isDraft && <section className="drawer-section"><h3>执行计时</h3>{isRunning ? <><div className="activity-row"><span className="activity-dot active-dot" /><div><strong>正在计时</strong><span>开始于 {new Date(running.started_at).toLocaleString('zh-CN')}</span></div></div><textarea className="session-note" value={sessionNote} onChange={(event) => setSessionNote(event.target.value)} placeholder="结束计时时保存一条简短记录（可选）" /></> : <p>开始后由服务器记录实际投入时间，同一时间只能计时一项任务。</p>}<div className="session-history">{history.error && <span className="drawer-error">{history.error}</span>}{history.data?.map((session) => <div className="session-record" key={session.id}><span className={session.status === 'finished' ? 'activity-dot' : 'activity-dot muted-dot'} /><div><strong>{session.status === 'finished' ? `学习 ${Math.max(1, Math.round(session.duration_seconds / 60))} 分钟` : session.status === 'running' ? '正在计时' : '已丢弃'}</strong><span>{new Date(session.started_at).toLocaleString('zh-CN')}{session.note ? ` · ${session.note}` : ''}</span></div></div>)}{history.data && !history.data.length && <span className="muted-copy">暂无历史计时记录</span>}</div></section>}{notice && <p className="drawer-error">{notice}</p>}</div><div className="drawer-actions"><button className="button" disabled={busy} onClick={save}>保存修改</button>{isDraft ? <button className="button button-danger" disabled={busy} onClick={() => execute(() => api(token, `/tasks/${task.id}`, { method: 'DELETE' }))}>删除草稿任务</button> : <>{task.status === 'done' ? <button className="button" disabled={busy} onClick={() => execute(() => api(token, `/tasks/${task.id}/reopen`, { method: 'POST' }))}>重新打开</button> : task.status !== 'canceled' && <button className="button" disabled={busy} onClick={() => execute(() => api(token, `/tasks/${task.id}/complete`, { method: 'POST' }))}>完成任务</button>}{task.status !== 'done' && task.status !== 'canceled' && !isRunning && <button className="button button-danger" disabled={busy} onClick={() => execute(() => api(token, `/tasks/${task.id}/cancel`, { method: 'POST' }))}>取消任务</button>}{isRunning ? <><button className="button" disabled={busy} onClick={() => execute(() => api(token, `/sessions/${running.id}/discard`, { method: 'POST' }))}>丢弃计时</button><button className="button button-primary" disabled={busy} onClick={() => execute(() => api(token, `/sessions/${running.id}/finish`, { method: 'POST', body: JSON.stringify({ note: sessionNote }) }))}><Clock3 size={15} />结束计时</button></> : <button className="button button-primary" disabled={busy || task.status === 'done' || task.status === 'canceled'} onClick={() => execute(() => api(token, `/tasks/${task.id}/sessions`, { method: 'POST' }))}><Timer size={15} />开始计时</button>}</>}</div></aside></div>
 }
 

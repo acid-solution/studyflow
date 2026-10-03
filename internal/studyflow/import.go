@@ -49,6 +49,9 @@ type ImportPlanTreeInput struct {
 	GoalID                string                 `json:"goal_id"`
 	Title                 string                 `json:"title"`
 	Description           string                 `json:"description"`
+	Objective             string                 `json:"objective"`
+	SuccessCriteria       string                 `json:"success_criteria"`
+	TargetDate            *string                `json:"target_date"`
 	Mode                  string                 `json:"mode"`
 	WeeklyCapacityMinutes uint                   `json:"weekly_capacity_minutes"`
 	StartDate             *string                `json:"start_date"`
@@ -181,6 +184,9 @@ type importDigest struct {
 	GoalID                string              `json:"goal_id"`
 	Title                 string              `json:"title"`
 	Description           string              `json:"description"`
+	Objective             string              `json:"objective"`
+	SuccessCriteria       string              `json:"success_criteria"`
+	TargetDate            *string             `json:"target_date"`
 	Mode                  string              `json:"mode"`
 	WeeklyCapacityMinutes uint                `json:"weekly_capacity_minutes"`
 	StartDate             *string             `json:"start_date"`
@@ -227,8 +233,8 @@ func (s *Service) ImportPlanTree(ctx context.Context, userID, idempotencyKey str
 	}
 
 	importID := uuid.NewString()
-	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: input.GoalID, Title: input.Title, Description: input.Description, Mode: input.Mode, Source: model.SourceAgent}
-	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: parseCanonicalDate(input.StartDate), EndDate: parseCanonicalDate(input.EndDate), StructureRevision: 1}
+	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: input.GoalID, Title: input.Title, Description: input.Description, Objective: input.Objective, SuccessCriteria: input.SuccessCriteria, TargetDate: parseCanonicalDate(input.TargetDate), Status: model.GoalStatusActive, Revision: 1, Source: model.SourceAgent}
+	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, Mode: input.Mode, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: parseCanonicalDate(input.StartDate), EndDate: parseCanonicalDate(input.EndDate), StructureRevision: 1}
 	receipt := model.PlanImport{ID: importID, UserID: userID, IdempotencyKey: key, RequestDigest: digest, PlanID: plan.ID, PlanVersionID: version.ID, CreatedAt: s.now().UTC()}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -326,9 +332,12 @@ func insertImportedTask(tx *gorm.DB, userID, versionID string, milestoneID *stri
 // Dates are stored back in the single layout parseDate accepts, so the digest
 // covers the value that is actually persisted.
 func normalizeImportInput(input ImportPlanTreeInput) (ImportPlanTreeInput, error) {
-	planInput, startDate, endDate, err := normalizePlanInput(CreatePlanInput{
+	planInput, targetDate, startDate, endDate, err := normalizePlanInput(CreatePlanInput{
 		Title:                 input.Title,
 		Description:           input.Description,
+		Objective:             input.Objective,
+		SuccessCriteria:       input.SuccessCriteria,
+		TargetDate:            input.TargetDate,
 		Mode:                  input.Mode,
 		WeeklyCapacityMinutes: input.WeeklyCapacityMinutes,
 		StartDate:             input.StartDate,
@@ -339,6 +348,9 @@ func normalizeImportInput(input ImportPlanTreeInput) (ImportPlanTreeInput, error
 	}
 	input.Title = planInput.Title
 	input.Description = planInput.Description
+	input.Objective = planInput.Objective
+	input.SuccessCriteria = planInput.SuccessCriteria
+	input.TargetDate = formatDatePtr(targetDate)
 	input.Mode = planInput.Mode
 	input.WeeklyCapacityMinutes = planInput.WeeklyCapacityMinutes
 	input.StartDate = formatDatePtr(startDate)
@@ -405,6 +417,9 @@ func validateImportBounds(input ImportPlanTreeInput) error {
 	if len(input.Description) > importMaxText {
 		return fmt.Errorf("%w: plan description too long", ErrValidation)
 	}
+	if len(input.Objective) > importMaxText || len(input.SuccessCriteria) > importMaxText {
+		return fmt.Errorf("%w: plan objective or success criteria too long", ErrValidation)
+	}
 	if input.WeeklyCapacityMinutes > importMaxMinutes {
 		return fmt.Errorf("%w: weekly capacity out of range", ErrValidation)
 	}
@@ -450,6 +465,9 @@ func digestImport(input ImportPlanTreeInput) (string, error) {
 		GoalID:                input.GoalID,
 		Title:                 input.Title,
 		Description:           input.Description,
+		Objective:             input.Objective,
+		SuccessCriteria:       input.SuccessCriteria,
+		TargetDate:            input.TargetDate,
 		Mode:                  input.Mode,
 		WeeklyCapacityMinutes: input.WeeklyCapacityMinutes,
 		StartDate:             input.StartDate,

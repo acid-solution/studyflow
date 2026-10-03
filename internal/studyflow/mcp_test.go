@@ -155,6 +155,7 @@ func TestMCPToolsIntegration(t *testing.T) {
 		"goal_id":                 goal.ID,
 		"idempotency_key":         "mcp-import-key-0001",
 		"title":                   "MCP 导入的计划",
+		"objective":               "完成 MCP 导入闭环",
 		"mode":                    model.PlanModeCalendar,
 		"weekly_capacity_minutes": 240,
 		"milestones": []any{
@@ -257,12 +258,23 @@ func TestMCPToolsIntegration(t *testing.T) {
 	// 7b. A replay has to describe the version the import created, not whatever is
 	// newest now. Clone a version, add a task to it, then replay: the counts must
 	// stay at what the import produced.
-	cloned, err := service.ClonePlanVersion(ctx, userID, imported.PlanID)
+	sourceVersionID := imported.PlanVersionID
+	cloned, err := service.CreatePlanVersion(ctx, userID, imported.PlanID, CreatePlanVersionInput{CreationMode: "copy", SourceVersionID: &sourceVersionID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CreateTask(ctx, userID, cloned.ID, CreateTaskInput{Title: "V2 追加的任务"}); err != nil {
+	draftTask, err := service.CreateTask(ctx, userID, cloned.ID, CreateTaskInput{Title: "V2 追加的任务"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	draftReschedule, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "reschedule_task", Arguments: map[string]any{
+		"task_id": draftTask.ID, "version": draftTask.Version, "scheduled_date": "2026-04-11",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !draftReschedule.IsError {
+		t.Fatal("MCP must not reschedule a draft or historical version task")
 	}
 	afterClone, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "import_plan_tree", Arguments: importArgs})
 	if err != nil {

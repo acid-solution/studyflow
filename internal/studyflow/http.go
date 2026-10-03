@@ -33,11 +33,19 @@ func RegisterRoutes(router *gin.Engine, handler *HTTPHandler, auth gin.HandlerFu
 	api.PATCH("/goals/:id", handler.updateGoal)
 	api.POST("/goals/:id/complete", handler.completeGoal)
 	api.POST("/goals/:id/abandon", handler.abandonGoal)
+	api.POST("/goals/:id/reopen", handler.reopenGoal)
+	api.PATCH("/goals/:id/completion-policy", handler.updateGoalCompletionPolicy)
 	api.POST("/goals/:id/plans", handler.createPlan)
 	api.GET("/plans", handler.listPlans)
 	api.GET("/plans/:id", handler.getPlan)
 	api.PATCH("/plans/:id", handler.updatePlan)
-	api.POST("/plans/:id/versions", handler.clonePlanVersion)
+	api.POST("/plans/:id/complete", handler.completePlan)
+	api.POST("/plans/:id/abandon", handler.abandonPlan)
+	api.POST("/plans/:id/reopen", handler.reopenPlan)
+	api.PATCH("/plans/:id/completion-policy", handler.updatePlanCompletionPolicy)
+	api.POST("/plans/:id/versions", handler.createPlanVersion)
+	api.PATCH("/plan-versions/:id", handler.updatePlanVersion)
+	api.POST("/plan-versions/:id/cancel", handler.cancelPlanVersion)
 	api.POST("/plan-versions/:id/activate", handler.activatePlanVersion)
 	api.POST("/plan-versions/:id/milestones", handler.createMilestone)
 	api.POST("/plan-versions/:id/tasks", handler.createTask)
@@ -84,12 +92,37 @@ func (h *HTTPHandler) goalTree(c *gin.Context) {
 	value, err := h.service.GoalTree(c, userID)
 	write(c, value, err)
 }
-func (h *HTTPHandler) completeGoal(c *gin.Context) { h.setGoalStatus(c, "achieved") }
-func (h *HTTPHandler) abandonGoal(c *gin.Context)  { h.setGoalStatus(c, "abandoned") }
-func (h *HTTPHandler) setGoalStatus(c *gin.Context, status string) {
+func (h *HTTPHandler) completeGoal(c *gin.Context) {
+	var input CompletionInput
+	if c.Request.ContentLength > 0 && !bind(c, &input) {
+		return
+	}
 	userID, _ := identity.UserID(c)
-	err := h.service.SetGoalStatus(c, userID, c.Param("id"), status)
-	write(c, gin.H{"status": status}, err)
+	value, err := h.service.CompleteGoal(c, userID, c.Param("id"), input)
+	write(c, value, err)
+}
+func (h *HTTPHandler) abandonGoal(c *gin.Context) {
+	var input AbandonInput
+	if c.Request.ContentLength > 0 && !bind(c, &input) {
+		return
+	}
+	userID, _ := identity.UserID(c)
+	value, err := h.service.AbandonGoal(c, userID, c.Param("id"), input)
+	write(c, value, err)
+}
+func (h *HTTPHandler) reopenGoal(c *gin.Context) {
+	userID, _ := identity.UserID(c)
+	value, err := h.service.ReopenGoal(c, userID, c.Param("id"))
+	write(c, value, err)
+}
+func (h *HTTPHandler) updateGoalCompletionPolicy(c *gin.Context) {
+	var input CompletionPolicyInput
+	if !bind(c, &input) {
+		return
+	}
+	userID, _ := identity.UserID(c)
+	value, err := h.service.UpdateGoalCompletionPolicy(c, userID, c.Param("id"), input)
+	write(c, value, err)
 }
 
 func (h *HTTPHandler) createPlan(c *gin.Context) {
@@ -103,7 +136,7 @@ func (h *HTTPHandler) createPlan(c *gin.Context) {
 }
 func (h *HTTPHandler) listPlans(c *gin.Context) {
 	userID, _ := identity.UserID(c)
-	value, err := h.service.ListPlans(c, userID, c.Query("goal_id"), c.Query("mode"))
+	value, err := h.service.ListPlans(c, userID, c.Query("goal_id"), c.Query("mode"), c.Query("status"))
 	write(c, value, err)
 }
 func (h *HTTPHandler) getPlan(c *gin.Context) {
@@ -120,9 +153,59 @@ func (h *HTTPHandler) updatePlan(c *gin.Context) {
 	value, err := h.service.UpdatePlan(c, userID, c.Param("id"), input)
 	write(c, value, err)
 }
-func (h *HTTPHandler) clonePlanVersion(c *gin.Context) {
+func (h *HTTPHandler) completePlan(c *gin.Context) {
+	var input CompletionInput
+	if c.Request.ContentLength > 0 && !bind(c, &input) {
+		return
+	}
 	userID, _ := identity.UserID(c)
-	value, err := h.service.ClonePlanVersion(c, userID, c.Param("id"))
+	value, err := h.service.CompletePlan(c, userID, c.Param("id"), input)
+	write(c, value, err)
+}
+func (h *HTTPHandler) abandonPlan(c *gin.Context) {
+	var input AbandonInput
+	if !bind(c, &input) {
+		return
+	}
+	userID, _ := identity.UserID(c)
+	value, err := h.service.AbandonPlan(c, userID, c.Param("id"), input)
+	write(c, value, err)
+}
+func (h *HTTPHandler) reopenPlan(c *gin.Context) {
+	userID, _ := identity.UserID(c)
+	value, err := h.service.ReopenPlan(c, userID, c.Param("id"))
+	write(c, value, err)
+}
+func (h *HTTPHandler) updatePlanCompletionPolicy(c *gin.Context) {
+	var input CompletionPolicyInput
+	if !bind(c, &input) {
+		return
+	}
+	userID, _ := identity.UserID(c)
+	value, err := h.service.UpdatePlanCompletionPolicy(c, userID, c.Param("id"), input)
+	write(c, value, err)
+}
+func (h *HTTPHandler) createPlanVersion(c *gin.Context) {
+	var input CreatePlanVersionInput
+	if !bind(c, &input) {
+		return
+	}
+	userID, _ := identity.UserID(c)
+	value, err := h.service.CreatePlanVersion(c, userID, c.Param("id"), input)
+	write(c, value, err)
+}
+func (h *HTTPHandler) updatePlanVersion(c *gin.Context) {
+	var input UpdatePlanVersionInput
+	if !bind(c, &input) {
+		return
+	}
+	userID, _ := identity.UserID(c)
+	value, err := h.service.UpdatePlanVersion(c, userID, c.Param("id"), input)
+	write(c, value, err)
+}
+func (h *HTTPHandler) cancelPlanVersion(c *gin.Context) {
+	userID, _ := identity.UserID(c)
+	value, err := h.service.CancelPlanVersion(c, userID, c.Param("id"))
 	write(c, value, err)
 }
 func (h *HTTPHandler) activatePlanVersion(c *gin.Context) {
@@ -293,8 +376,8 @@ func write(c *gin.Context, value any, err error) {
 		response.FailInvalidArgument(c, "请求参数无效")
 	case errors.Is(err, ErrVersionConflict):
 		response.FailConflict(c, "version_conflict")
-	case errors.Is(err, ErrPlanVersionConflict):
-		response.FailConflict(c, "plan_version_conflict")
+	case errors.Is(err, ErrNoRequiredChildren):
+		response.FailConflictData(c, "goal_has_no_required_children", "目标没有任何计入判断的子项", nil)
 	case errors.Is(err, ErrIdempotencyConflict):
 		response.FailConflict(c, "idempotency_key_conflict")
 	case errors.Is(err, ErrConflict):
@@ -302,6 +385,19 @@ func write(c *gin.Context, value any, err error) {
 	case errors.Is(err, ErrInvalidState):
 		response.FailConflict(c, "当前状态不允许此操作")
 	default:
-		response.FailInternalError(c, "服务暂时不可用")
+		var confirmation *CompletionConfirmationError
+		var ancestors *AncestorStateError
+		switch {
+		case errors.As(err, &confirmation):
+			message := "目标仍有未达成子项"
+			if confirmation.Scope == "plan" {
+				message = "计划仍有未完成内容"
+			}
+			response.FailConflictData(c, "completion_confirmation_required", message, confirmation.Summary)
+		case errors.As(err, &ancestors):
+			response.FailConflictData(c, "ancestor_not_active", "请先从上到下恢复上层目标", gin.H{"ancestors": ancestors.Ancestors})
+		default:
+			response.FailInternalError(c, "服务暂时不可用")
+		}
 	}
 }

@@ -1,14 +1,15 @@
 # StudyFlow
 
-StudyFlow 是面向个人学习执行的多用户平台。用户可以把长期目标递归拆成分目标，在任意目标下同时推进多个按日期或按课时的计划，通过版本草稿调整路线，并用任务、计时与改期记录生成周度复盘。
+StudyFlow 是面向个人学习执行的多用户平台。用户可以把长期目标递归拆成分目标，在任意目标下建立带有明确子目标的计划；计划的每个版本都是一套彼此独立的执行方案，可以留档、切换，也可以作为新版本模板。任务、计时与改期记录用于每日推进和周度复盘。
 
 项目使用独立的 `shared-auth` 认证服务。StudyFlow 只保存 JWT 中的稳定 UUID，不保存账号、密码或本地 Session。
 
 ## 已实现的业务闭环
 
-- 不限层数的目标树，支持移动、达成、放弃和 `ready_to_complete` 完成提示。
-- 同一目标下多个并行计划；计划分为 `calendar` 和 `sequence` 两种固定模式。
-- 每个计划独立维护 V1、V2 等版本；草稿从当前版本复制未完成任务，激活时保留历史版本和执行记录。
+- 不限层数的目标树；直属子 Goal 与直属 Plan 一起参与完成摘要，达成始终由用户确认。
+- Plan 自带必填目标和可选完成标准；Plan、Goal 均使用 `active / achieved / abandoned`，放弃项可以继续阻塞上层或从判断中排除。
+- 每个版本独立保存 `calendar / sequence` 推进模式、阶段、任务和进度；支持空白创建、复制任意版本、取消草稿与切换历史版本。
+- 版本复制只生成一次快照，不复制计时、改期和完成事件，此后来源版本与新版本不再联动。
 - 阶段与任务编排，日期任务只排到天，课时计划按顺序返回下一课。
 - 首页按“逾期、今天、按课时、未来”返回任务。
 - 任务完成、重新打开、取消、改期和整数版本乐观锁。
@@ -32,9 +33,10 @@ StudyFlow 是面向个人学习执行的多用户平台。用户可以把长期�
 ## 核心数据关系
 
 ```text
-Goal（可递归）
-└─ Plan（同一目标可并行多个）
-   └─ PlanVersion（草稿 / 生效 / 历史）
+Goal（可递归的大目标）
+├─ Child Goal
+└─ Plan（自带可验收的子目标）
+   └─ PlanVersion（独立方案：草稿 / 当前 / 历史 / 已取消）
       ├─ Milestone
       └─ Task
          └─ StudySession
@@ -126,11 +128,19 @@ docker compose --env-file .env.compose up --build -d
 | PATCH | `/api/v1/goals/:id` | 编辑或移动目标 |
 | POST | `/api/v1/goals/:id/complete` | 确认达成目标 |
 | POST | `/api/v1/goals/:id/abandon` | 放弃目标 |
+| POST | `/api/v1/goals/:id/reopen` | 按祖先顺序恢复目标 |
+| PATCH | `/api/v1/goals/:id/completion-policy` | 修改放弃项对父目标的影响 |
 | POST | `/api/v1/goals/:id/plans` | 创建计划与 V1 草稿 |
 | GET | `/api/v1/plans` | 查询计划 |
 | GET/PATCH | `/api/v1/plans/:id` | 计划详情或编辑 |
-| POST | `/api/v1/plans/:id/versions` | 从生效版复制新草稿 |
-| POST | `/api/v1/plan-versions/:id/activate` | 激活草稿 |
+| POST | `/api/v1/plans/:id/complete` | 用户确认计划目标达成 |
+| POST | `/api/v1/plans/:id/abandon` | 放弃计划并选择上层影响 |
+| POST | `/api/v1/plans/:id/reopen` | 恢复计划 |
+| PATCH | `/api/v1/plans/:id/completion-policy` | 修改放弃计划的上层影响 |
+| POST | `/api/v1/plans/:id/versions` | 创建空白版本或复制任意版本 |
+| PATCH | `/api/v1/plan-versions/:id` | 修改草稿版本设置 |
+| POST | `/api/v1/plan-versions/:id/cancel` | 取消草稿 |
+| POST | `/api/v1/plan-versions/:id/activate` | 激活草稿或切换历史版本 |
 | POST | `/api/v1/plan-versions/:id/milestones` | 新建阶段 |
 | POST | `/api/v1/plan-versions/:id/tasks` | 新建任务 |
 | POST | `/api/v1/plan-imports` | 批量导入计划树（幂等） |
@@ -158,6 +168,9 @@ docker compose --env-file .env.compose up --build -d
 {
   "goal_id": "目标 UUID",
   "title": "力扣冲刺",
+  "objective": "能够稳定解决常见数组与哈希题",
+  "success_criteria": "核心题型完成复现并通过限时自测",
+  "target_date": "2026-11-30",
   "mode": "calendar",
   "weekly_capacity_minutes": 600,
   "milestones": [
@@ -199,7 +212,7 @@ docker compose --env-file .env.compose up --build -d
 | 工具 | 用途 |
 | --- | --- |
 | `import_plan_tree` | 一次事务导入计划树，参数与 `/api/v1/plan-imports` 相同，另加一个调用方生成的 `idempotency_key` |
-| `query_progress` | 查询生效计划的完成进度和任务列表，任务带上乐观锁版本号 |
+| `query_progress` | 查询进行中 Plan 的当前版本进度和任务，返回计划目标、状态、版本模式及任务乐观锁版本号 |
 | `reschedule_task` | 修改或取消某个任务的计划日期，必须回传版本号 |
 
 两个设计点：
@@ -277,4 +290,4 @@ npm run build
 go test ./internal/studyflow -run TestPlanningExecutionAndReviewIntegration -v
 ```
 
-测试覆盖递归目标、循环引用阻止、并行计划、版本复制与激活、用户隔离、首页分类、乐观锁、单计时约束和周报聚合。
+测试覆盖递归目标、完成摘要、放弃策略、祖先恢复顺序、独立版本复制与历史切换、用户隔离、首页分类、乐观锁、单计时约束、周报聚合，以及空库迁移与回滚。

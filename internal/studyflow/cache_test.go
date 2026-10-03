@@ -145,23 +145,23 @@ func TestGoalTreeCacheIntegration(t *testing.T) {
 			}
 			return nil
 		}},
-		{"SetGoalStatus", func() error {
+		{"AbandonGoal", func() error {
 			created, err := service.CreateGoal(ctx, userID, CreateGoalInput{Title: "待放弃"})
 			if err != nil {
 				return err
 			}
 			before := generation()
-			if err := service.SetGoalStatus(ctx, userID, created.ID, model.GoalStatusAbandoned); err != nil {
+			if _, err := service.AbandonGoal(ctx, userID, created.ID, AbandonInput{}); err != nil {
 				return err
 			}
 			if generation() == before {
-				t.Error("SetGoalStatus did not invalidate")
+				t.Error("AbandonGoal did not invalidate")
 			}
 			return nil
 		}},
 		{"CreatePlan", func() error {
 			before := generation()
-			if _, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "缓存计划", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60}); err != nil {
+			if _, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "缓存计划", Objective: "验证缓存失效", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60}); err != nil {
 				return err
 			}
 			if generation() == before {
@@ -170,12 +170,12 @@ func TestGoalTreeCacheIntegration(t *testing.T) {
 			return nil
 		}},
 		{"UpdatePlan", func() error {
-			plan, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "待改计划", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
+			plan, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "待改计划", Objective: "验证计划更新", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
 			if err != nil {
 				return err
 			}
 			before := generation()
-			if _, err := service.UpdatePlan(ctx, userID, plan.Plan.ID, UpdatePlanInput{Title: stringPointer("改过的计划")}); err != nil {
+			if _, err := service.UpdatePlan(ctx, userID, plan.Plan.ID, UpdatePlanInput{Revision: plan.Plan.Revision, Title: stringPointer("改过的计划")}); err != nil {
 				return err
 			}
 			if generation() == before {
@@ -183,8 +183,8 @@ func TestGoalTreeCacheIntegration(t *testing.T) {
 			}
 			return nil
 		}},
-		{"ClonePlanVersion", func() error {
-			plan, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "待复制", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
+		{"CreatePlanVersion", func() error {
+			plan, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "待复制", Objective: "验证版本复制", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
 			if err != nil {
 				return err
 			}
@@ -192,16 +192,16 @@ func TestGoalTreeCacheIntegration(t *testing.T) {
 				return err
 			}
 			before := generation()
-			if _, err := service.ClonePlanVersion(ctx, userID, plan.Plan.ID); err != nil {
+			if _, err := service.CreatePlanVersion(ctx, userID, plan.Plan.ID, CreatePlanVersionInput{CreationMode: "copy", SourceVersionID: &plan.Versions[0].ID}); err != nil {
 				return err
 			}
 			if generation() == before {
-				t.Error("ClonePlanVersion did not invalidate")
+				t.Error("CreatePlanVersion did not invalidate")
 			}
 			return nil
 		}},
 		{"ActivatePlanVersion", func() error {
-			plan, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "待激活", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
+			plan, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "待激活", Objective: "验证版本激活", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
 			if err != nil {
 				return err
 			}
@@ -362,7 +362,7 @@ func TestGoalTreeCacheIntegration(t *testing.T) {
 		{"ImportPlanTree", func() error {
 			before := generation()
 			if _, err := service.ImportPlanTree(ctx, userID, "cache-invalidate-key", ImportPlanTreeInput{
-				GoalID: goal.ID, Title: "导入的计划", Mode: model.PlanModeCalendar,
+				GoalID: goal.ID, Title: "导入的计划", Objective: "验证批量导入", Mode: model.PlanModeCalendar,
 				Milestones: []ImportMilestoneInput{{Title: "阶段", Tasks: []ImportTaskInput{{Title: "任务"}}}},
 			}); err != nil {
 				return err
@@ -393,7 +393,7 @@ func TestGoalTreeCacheIntegration(t *testing.T) {
 // draftVersion creates a plan under the goal and returns its V1 draft id.
 func draftVersion(t *testing.T, service *Service, ctx context.Context, userID, goalID, title string) string {
 	t.Helper()
-	plan, err := service.CreatePlan(ctx, userID, goalID, CreatePlanInput{Title: title, Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
+	plan, err := service.CreatePlan(ctx, userID, goalID, CreatePlanInput{Title: title, Objective: title + "的目标", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
 	if err != nil {
 		t.Fatal(err)
 	}

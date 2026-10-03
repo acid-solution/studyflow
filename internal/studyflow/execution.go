@@ -46,6 +46,7 @@ type UpdateTaskInput struct {
 	ScheduledDate      *string `json:"scheduled_date"`
 	ClearScheduledDate bool    `json:"clear_scheduled_date"`
 	Position           *uint   `json:"position"`
+	RequireCurrentPlan bool    `json:"-"`
 }
 
 type TaskFilter struct {
@@ -102,11 +103,11 @@ func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string,
 	}
 	var created *model.Milestone
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		version, _, err := s.versionAndPlan(ctx, tx, userID, versionID, true)
+		version, plan, err := s.versionAndPlan(ctx, tx, userID, versionID, true)
 		if err != nil {
 			return err
 		}
-		if version.Status != model.PlanVersionDraft {
+		if version.Status != model.PlanVersionDraft || plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
 		position := input.Position
@@ -137,11 +138,11 @@ func (s *Service) UpdateMilestone(ctx context.Context, userID, milestoneID strin
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", milestoneID, userID).First(&item).Error; err != nil {
 			return mapNotFound(err)
 		}
-		version, _, err := s.versionAndPlan(ctx, tx, userID, item.PlanVersionID, false)
+		version, plan, err := s.versionAndPlan(ctx, tx, userID, item.PlanVersionID, false)
 		if err != nil {
 			return err
 		}
-		if version.Status != model.PlanVersionDraft {
+		if version.Status != model.PlanVersionDraft || plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
 		changes := map[string]any{}
@@ -195,11 +196,11 @@ func (s *Service) DeleteMilestone(ctx context.Context, userID, milestoneID strin
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", milestoneID, userID).First(&item).Error; err != nil {
 			return mapNotFound(err)
 		}
-		version, _, err := s.versionAndPlan(ctx, tx, userID, item.PlanVersionID, false)
+		version, plan, err := s.versionAndPlan(ctx, tx, userID, item.PlanVersionID, false)
 		if err != nil {
 			return err
 		}
-		if version.Status != model.PlanVersionDraft {
+		if version.Status != model.PlanVersionDraft || plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
 		if err := tx.Where("milestone_id = ? AND user_id = ?", item.ID, userID).Delete(&model.Task{}).Error; err != nil {
@@ -264,10 +265,10 @@ func (s *Service) CreateTask(ctx context.Context, userID, versionID string, inpu
 			return err
 		}
 		plan = *foundPlan
-		if version.Status != model.PlanVersionDraft && version.Status != model.PlanVersionActive {
+		if plan.Status != model.GoalStatusActive || (version.Status != model.PlanVersionDraft && version.Status != model.PlanVersionActive) {
 			return ErrInvalidState
 		}
-		if err := validateTaskSchedule(plan.Mode, date); err != nil {
+		if err := validateTaskSchedule(version.Mode, date); err != nil {
 			return err
 		}
 		if input.MilestoneID != nil {
@@ -304,7 +305,7 @@ func (s *Service) CreateTask(ctx context.Context, userID, versionID string, inpu
 		return nil, err
 	}
 	s.invalidate(ctx, userID)
-	view := taskView(*created, plan.ID, plan.Title, plan.Mode, time.Time{})
+	view := taskView(*created, plan.ID, plan.Title, versionMode(s.db, userID, created.PlanVersionID), time.Time{})
 	return &view, nil
 }
 
@@ -327,7 +328,10 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 			return err
 		}
 		plan = *foundPlan
-		if version.Status != model.PlanVersionDraft && version.Status != model.PlanVersionActive {
+		if plan.Status != model.GoalStatusActive || (version.Status != model.PlanVersionDraft && version.Status != model.PlanVersionActive) {
+			return ErrInvalidState
+		}
+		if input.RequireCurrentPlan && (version.Status != model.PlanVersionActive || plan.ActiveVersionID == nil || *plan.ActiveVersionID != version.ID) {
 			return ErrInvalidState
 		}
 		changes := map[string]any{"version": gorm.Expr("version + 1")}
@@ -379,7 +383,7 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 			if err != nil {
 				return err
 			}
-			if plan.Mode == model.PlanModeSequence {
+			if version.Mode == model.PlanModeSequence {
 				return fmt.Errorf("%w: sequence plan cannot schedule a date", ErrValidation)
 			}
 			changes["scheduled_date"] = date
@@ -414,7 +418,7 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 		return nil, err
 	}
 	s.invalidate(ctx, userID)
-	view := taskView(updated, plan.ID, plan.Title, plan.Mode, time.Time{})
+	view := taskView(updated, plan.ID, plan.Title, versionMode(s.db, userID, updated.PlanVersionID), time.Time{})
 	return &view, nil
 }
 
@@ -424,11 +428,11 @@ func (s *Service) DeleteTask(ctx context.Context, userID, taskID string) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error; err != nil {
 			return mapNotFound(err)
 		}
-		version, _, err := s.versionAndPlan(ctx, tx, userID, task.PlanVersionID, false)
+		version, plan, err := s.versionAndPlan(ctx, tx, userID, task.PlanVersionID, false)
 		if err != nil {
 			return err
 		}
-		if version.Status != model.PlanVersionDraft {
+		if version.Status != model.PlanVersionDraft || plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
 		if err := tx.Where("id = ? AND user_id = ?", task.ID, userID).Delete(&model.Task{}).Error; err != nil {
@@ -455,7 +459,7 @@ func (s *Service) SetTaskStatus(ctx context.Context, userID, taskID, action stri
 			return err
 		}
 		plan = *foundPlan
-		if version.Status != model.PlanVersionActive {
+		if version.Status != model.PlanVersionActive || plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
 		now := s.now().UTC()
@@ -505,7 +509,7 @@ func (s *Service) SetTaskStatus(ctx context.Context, userID, taskID, action stri
 		return nil, err
 	}
 	s.invalidate(ctx, userID)
-	view := taskView(updated, plan.ID, plan.Title, plan.Mode, time.Time{})
+	view := taskView(updated, plan.ID, plan.Title, versionMode(s.db, userID, updated.PlanVersionID), time.Time{})
 	return &view, nil
 }
 
@@ -520,7 +524,7 @@ func (s *Service) StartSession(ctx context.Context, userID, taskID string) (*Ses
 		if err != nil {
 			return err
 		}
-		if version.Status != model.PlanVersionActive || plan.ActiveVersionID == nil || *plan.ActiveVersionID != version.ID {
+		if plan.Status != model.GoalStatusActive || version.Status != model.PlanVersionActive || plan.ActiveVersionID == nil || *plan.ActiveVersionID != version.ID {
 			return ErrInvalidState
 		}
 		if task.Status == model.TaskStatusDone || task.Status == model.TaskStatusCanceled {
@@ -662,7 +666,7 @@ func (s *Service) loadTasks(ctx context.Context, userID string, filter TaskFilte
 		PlanTitle string
 		PlanMode  string
 	}
-	query := s.db.WithContext(ctx).Table("tasks t").Select("t.*, p.id AS plan_id, p.title AS plan_title, p.mode AS plan_mode").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id AND p.active_version_id = pv.id").Where("t.user_id = ?", userID)
+	query := s.db.WithContext(ctx).Table("tasks t").Select("t.*, p.id AS plan_id, p.title AS plan_title, pv.mode AS plan_mode").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id AND p.active_version_id = pv.id AND p.status = ?", model.GoalStatusActive).Where("t.user_id = ?", userID)
 	if filter.GoalID != "" {
 		query = query.Where("p.goal_id = ?", filter.GoalID)
 	}
@@ -800,7 +804,7 @@ func (s *Service) TodayDashboard(ctx context.Context, userID string) (*Dashboard
 		TaskStatus    string
 	}
 	var running sessionRow
-	if err := s.db.WithContext(ctx).Table("study_sessions s").Select("s.*, t.title AS task_title, t.plan_version_id, t.version AS task_version, t.status AS task_status, p.id AS plan_id, p.title AS plan_title, p.mode AS plan_mode").Joins("JOIN tasks t ON t.id = s.task_id").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id").Where("s.user_id = ? AND s.status = ?", userID, model.SessionStatusRunning).Take(&running).Error; err == nil {
+	if err := s.db.WithContext(ctx).Table("study_sessions s").Select("s.*, t.title AS task_title, t.plan_version_id, t.version AS task_version, t.status AS task_status, p.id AS plan_id, p.title AS plan_title, pv.mode AS plan_mode").Joins("JOIN tasks t ON t.id = s.task_id").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id").Where("s.user_id = ? AND s.status = ?", userID, model.SessionStatusRunning).Take(&running).Error; err == nil {
 		task := TaskView{ID: running.TaskID, PlanID: running.PlanID, PlanTitle: running.PlanTitle, PlanMode: running.PlanMode, PlanVersionID: running.PlanVersionID, Title: running.TaskTitle, Status: running.TaskStatus, Version: running.TaskVersion}
 		dashboard.RunningSession = &RunningSessionView{Session: sessionView(running.StudySession), Task: task}
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -823,6 +827,14 @@ func (s *Service) versionAndPlan(ctx context.Context, db *gorm.DB, userID, versi
 		return nil, nil, mapNotFound(err)
 	}
 	return &version, &plan, nil
+}
+
+func versionMode(db *gorm.DB, userID, versionID string) string {
+	var version model.PlanVersion
+	if err := db.Where("id = ? AND user_id = ?", versionID, userID).Select("mode").First(&version).Error; err != nil {
+		return ""
+	}
+	return version.Mode
 }
 
 func bumpStructure(tx *gorm.DB, userID, versionID string) error {

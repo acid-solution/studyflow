@@ -41,15 +41,15 @@ func TestPlanningExecutionAndReviewIntegration(t *testing.T) {
 		t.Fatalf("expected cycle validation, got %v", err)
 	}
 
-	calendar, err := service.CreatePlan(t.Context(), userID, child.ID, CreatePlanInput{Title: "StudyFlow 开发", Mode: "calendar", WeeklyCapacityMinutes: 600})
+	calendar, err := service.CreatePlan(t.Context(), userID, child.ID, CreatePlanInput{Title: "StudyFlow 开发", Objective: "完成 StudyFlow 第一版", Mode: "calendar", WeeklyCapacityMinutes: 600})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sequence, err := service.CreatePlan(t.Context(), userID, child.ID, CreatePlanInput{Title: "Go 八股", Mode: "sequence", WeeklyCapacityMinutes: 240})
+	sequence, err := service.CreatePlan(t.Context(), userID, child.ID, CreatePlanInput{Title: "Go 八股", Objective: "能够解释常见 Go 后端问题", Mode: "sequence", WeeklyCapacityMinutes: 240})
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := service.ListPlans(t.Context(), userID, child.ID, "")
+	plans, err := service.ListPlans(t.Context(), userID, child.ID, "", "")
 	if err != nil || len(plans) != 2 {
 		t.Fatalf("parallel plans = %d, err=%v", len(plans), err)
 	}
@@ -159,7 +159,8 @@ func TestPlanningExecutionAndReviewIntegration(t *testing.T) {
 	}
 	// A task due yesterday and finished today belongs in the finished section even
 	// though its scheduled date is in the past.
-	if _, err := service.SetTaskStatus(t.Context(), userID, overdue.ID, "complete"); err != nil {
+	completedOverdue, err := service.SetTaskStatus(t.Context(), userID, overdue.ID, "complete")
+	if err != nil {
 		t.Fatal(err)
 	}
 	afterLateFinish, err := service.TodayDashboard(t.Context(), userID)
@@ -193,18 +194,20 @@ func TestPlanningExecutionAndReviewIntegration(t *testing.T) {
 		t.Fatalf("sequence plan did not advance: %+v err=%v", dashboard.SequencePlans, err)
 	}
 
-	clone, err := service.ClonePlanVersion(t.Context(), userID, calendar.Plan.ID)
+	sourceCalendarVersionID := draft.ID
+	clone, err := service.CreatePlanVersion(t.Context(), userID, calendar.Plan.ID, CreatePlanVersionInput{CreationMode: "copy", SourceVersionID: &sourceCalendarVersionID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, item := range clone.Milestones {
 		for _, task := range item.Tasks {
-			if task.Title == todayTask.Title {
-				t.Fatal("completed task was copied into next version")
+			if task.Title == todayTask.Title && task.Status != model.TaskStatusDone {
+				t.Fatal("completed task should be copied with its status")
 			}
 		}
 	}
-	if _, err := service.SetTaskStatus(t.Context(), userID, overdue.ID, "complete"); err != nil {
+	renamedAfterCopy := "来源版本后来改名"
+	if _, err := service.UpdateTask(t.Context(), userID, overdue.ID, UpdateTaskInput{Version: completedOverdue.Version, Title: &renamedAfterCopy}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.ActivatePlanVersion(t.Context(), userID, clone.ID); err != nil {
@@ -220,14 +223,15 @@ func TestPlanningExecutionAndReviewIntegration(t *testing.T) {
 		}
 		for _, stage := range version.Milestones {
 			for _, task := range stage.Tasks {
-				if task.Title == overdue.Title {
-					t.Fatal("task completed after draft creation remained in activated draft")
+				if task.Title == renamedAfterCopy {
+					t.Fatal("source changes after copy must not alter the independent draft")
 				}
 			}
 		}
 	}
 
-	sequenceClone, err := service.ClonePlanVersion(t.Context(), userID, sequence.Plan.ID)
+	sourceSequenceVersionID := sequenceDraft.ID
+	sequenceClone, err := service.CreatePlanVersion(t.Context(), userID, sequence.Plan.ID, CreatePlanVersionInput{CreationMode: "copy", SourceVersionID: &sourceSequenceVersionID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +250,7 @@ func TestPlanningExecutionAndReviewIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conflictPlan, err := service.CreatePlan(t.Context(), userID, child.ID, CreatePlanInput{Title: "版本冲突验证", Mode: "sequence"})
+	conflictPlan, err := service.CreatePlan(t.Context(), userID, child.ID, CreatePlanInput{Title: "版本独立性验证", Objective: "验证版本互不联动", Mode: "sequence"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +261,8 @@ func TestPlanningExecutionAndReviewIntegration(t *testing.T) {
 	if _, err := service.ActivatePlanVersion(t.Context(), userID, conflictPlan.Versions[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	conflictDraft, err := service.ClonePlanVersion(t.Context(), userID, conflictPlan.Plan.ID)
+	conflictSourceID := conflictPlan.Versions[0].ID
+	conflictDraft, err := service.CreatePlanVersion(t.Context(), userID, conflictPlan.Plan.ID, CreatePlanVersionInput{CreationMode: "copy", SourceVersionID: &conflictSourceID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,8 +270,8 @@ func TestPlanningExecutionAndReviewIntegration(t *testing.T) {
 	if _, err := service.UpdateTask(t.Context(), userID, conflictTask.ID, UpdateTaskInput{Version: conflictTask.Version, Title: &changedTitle}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ActivatePlanVersion(t.Context(), userID, conflictDraft.ID); !errors.Is(err, ErrPlanVersionConflict) {
-		t.Fatalf("expected plan version conflict, got %v", err)
+	if _, err := service.ActivatePlanVersion(t.Context(), userID, conflictDraft.ID); err != nil {
+		t.Fatalf("source changes must not block independent draft activation: %v", err)
 	}
 
 	review, err := service.WeeklyReview(t.Context(), userID, "2026-09-21")
@@ -275,6 +280,207 @@ func TestPlanningExecutionAndReviewIntegration(t *testing.T) {
 	}
 	if review.CompletedTasks != 3 || review.ActualDurationSeconds != 5400 || review.PlannedMinutes != 840 {
 		t.Fatalf("unexpected review: %+v", review)
+	}
+}
+
+func TestGoalPlanSemanticsAndIndependentVersionsIntegration(t *testing.T) {
+	dsn := os.Getenv("TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("TEST_MYSQL_DSN is not set")
+	}
+	db, err := database.OpenMySQL(dsn, "../../migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(db)
+	userID := uuid.NewString()
+	otherUserID := uuid.NewString()
+	defer cleanupUser(t, db, userID)
+	defer cleanupUser(t, db, otherUserID)
+	ctx := t.Context()
+
+	empty, err := service.CreateGoal(ctx, userID, CreateGoalInput{Title: "空目标"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CompleteGoal(ctx, userID, empty.ID, CompletionInput{AcknowledgeIncomplete: true}); !errors.Is(err, ErrNoRequiredChildren) {
+		t.Fatalf("an empty goal cannot be completed, got %v", err)
+	}
+
+	root, err := service.CreateGoal(ctx, userID, CreateGoalInput{Title: "成为可靠的后端开发者"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := service.CreateGoal(ctx, userID, CreateGoalInput{ParentGoalID: &root.ID, Title: "掌握鉴权"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreatePlan(ctx, userID, child.ID, CreatePlanInput{Title: "缺少目标", Mode: model.PlanModeCalendar}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("a plan objective is required, got %v", err)
+	}
+	plan, err := service.CreatePlan(ctx, userID, child.ID, CreatePlanInput{
+		Title:           "鉴权系统实践",
+		Objective:       "能够独立实现并解释完整鉴权系统",
+		SuccessCriteria: "通过关键失败场景测试",
+		Mode:            model.PlanModeCalendar,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CompletePlan(ctx, userID, plan.Plan.ID, CompletionInput{}); err == nil {
+		t.Fatal("a plan without an active version should require confirmation")
+	} else {
+		var confirmation *CompletionConfirmationError
+		if !errors.As(err, &confirmation) {
+			t.Fatalf("expected completion confirmation, got %v", err)
+		}
+	}
+
+	v1 := plan.Versions[0]
+	doneTask, err := service.CreateTask(ctx, userID, v1.ID, CreateTaskInput{Title: "实现登录"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openTask, err := service.CreateTask(ctx, userID, v1.ID, CreateTaskInput{Title: "实现刷新轮换"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ActivatePlanVersion(ctx, userID, v1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SetTaskStatus(ctx, userID, doneTask.ID, "complete"); err != nil {
+		t.Fatal(err)
+	}
+	copyV2, err := service.CreatePlanVersion(ctx, userID, plan.Plan.ID, CreatePlanVersionInput{CreationMode: "copy", SourceVersionID: &v1.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copyV2.Mode != model.PlanModeCalendar || copyV2.SourceVersionID == nil || *copyV2.SourceVersionID != v1.ID {
+		t.Fatalf("copy should retain mode and source trace: %+v", copyV2)
+	}
+	var copiedDone, copiedOpen *TaskView
+	for _, task := range copyV2.UnassignedTasks {
+		switch task.Title {
+		case doneTask.Title:
+			value := task
+			copiedDone = &value
+		case openTask.Title:
+			value := task
+			copiedOpen = &value
+		}
+	}
+	if copiedDone == nil || copiedDone.Status != model.TaskStatusDone || copiedDone.CompletedAt != nil || copiedOpen == nil || copiedOpen.Status != model.TaskStatusTodo {
+		t.Fatalf("copy should preserve status without copying completion events: %+v", copyV2.UnassignedTasks)
+	}
+	if _, err := service.CreatePlanVersion(ctx, userID, plan.Plan.ID, CreatePlanVersionInput{CreationMode: "blank", Mode: model.PlanModeSequence}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("only one draft is allowed, got %v", err)
+	}
+	newTitle := "来源版本后来改名"
+	if _, err := service.UpdateTask(ctx, userID, openTask.ID, UpdateTaskInput{Version: openTask.Version, Title: &newTitle}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ActivatePlanVersion(ctx, userID, copyV2.ID); err != nil {
+		t.Fatalf("source changes must not block activating an independent copy: %v", err)
+	}
+	detail, err := service.GetPlan(ctx, userID, plan.Plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeV2 := detail.Versions[0]
+	for _, version := range detail.Versions {
+		if version.ID == copyV2.ID {
+			activeV2 = version
+		}
+	}
+	for _, task := range activeV2.UnassignedTasks {
+		if task.ID == copiedOpen.ID && task.Title != openTask.Title {
+			t.Fatalf("source modification leaked into copied version: %+v", task)
+		}
+	}
+	if _, err := service.ActivatePlanVersion(ctx, userID, v1.ID); err != nil {
+		t.Fatalf("a historical version should be switchable: %v", err)
+	}
+	blank, err := service.CreatePlanVersion(ctx, userID, plan.Plan.ID, CreatePlanVersionInput{CreationMode: "blank", Mode: model.PlanModeSequence, WeeklyCapacityMinutes: 180})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blank.VersionNo != 3 || blank.Mode != model.PlanModeSequence || len(blank.UnassignedTasks) != 0 || len(blank.Milestones) != 0 {
+		t.Fatalf("blank version should be independent and use max version + 1: %+v", blank)
+	}
+	if _, err := service.CancelPlanVersion(ctx, userID, blank.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ActivatePlanVersion(ctx, userID, blank.ID); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("a canceled version cannot be activated, got %v", err)
+	}
+
+	if _, err := service.CompletePlan(ctx, userID, plan.Plan.ID, CompletionInput{}); err == nil {
+		t.Fatal("open tasks should require explicit acknowledgement")
+	}
+	if _, err := service.CompletePlan(ctx, userID, plan.Plan.ID, CompletionInput{AcknowledgeIncomplete: true}); err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := service.TodayDashboard(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range append(append(dashboard.Overdue, dashboard.Today...), dashboard.Future...) {
+		if task.PlanID == plan.Plan.ID {
+			t.Fatal("an achieved plan must not appear on the dashboard")
+		}
+	}
+
+	if _, err := service.AbandonGoal(ctx, userID, child.ID, AbandonInput{ParentEffect: "block"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReopenPlan(ctx, userID, plan.Plan.ID); err == nil {
+		t.Fatal("a plan cannot reopen while an ancestor goal is inactive")
+	} else {
+		var ancestors *AncestorStateError
+		if !errors.As(err, &ancestors) || len(ancestors.Ancestors) == 0 {
+			t.Fatalf("expected inactive ancestor details, got %v", err)
+		}
+	}
+	if _, err := service.UpdateGoalCompletionPolicy(ctx, userID, child.ID, CompletionPolicyInput{ParentEffect: "exclude"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdateGoalCompletionPolicy(ctx, otherUserID, child.ID, CompletionPolicyInput{ParentEffect: "exclude"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("another user's goal policy must look missing, got %v", err)
+	}
+	tree, err := service.GoalTree(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rootView *GoalNode
+	for _, candidate := range tree {
+		if candidate.ID == root.ID {
+			rootView = candidate
+		}
+	}
+	if rootView == nil || rootView.CompletionSummary.IncludedChildren != 0 || rootView.CompletionSummary.ExcludedChildren != 1 {
+		t.Fatalf("excluded child should leave the parent without required children: %+v", rootView)
+	}
+	if _, err := service.ReopenGoal(ctx, userID, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReopenPlan(ctx, userID, plan.Plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AbandonPlan(ctx, userID, plan.Plan.ID, AbandonInput{ParentEffect: "block"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdatePlanCompletionPolicy(ctx, userID, plan.Plan.ID, CompletionPolicyInput{ParentEffect: "exclude"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdatePlanCompletionPolicy(ctx, otherUserID, plan.Plan.ID, CompletionPolicyInput{ParentEffect: "exclude"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("another user's plan policy must look missing, got %v", err)
+	}
+	childView, err := service.goalByID(ctx, userID, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childView.CompletionSummary.IncludedChildren != 0 || childView.CompletionSummary.ExcludedChildren != 1 {
+		t.Fatalf("plan exclusion policy was not reflected in its goal: %+v", childView.CompletionSummary)
 	}
 }
 
@@ -303,7 +509,7 @@ func TestPlanTreeImportIntegration(t *testing.T) {
 
 	// Guard the extraction this change made: creating a single milestone or task
 	// must still bump the structure revision of the version it writes into.
-	guard, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "护栏计划", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
+	guard, err := service.CreatePlan(ctx, userID, goal.ID, CreatePlanInput{Title: "护栏计划", Objective: "验证结构修订", Mode: model.PlanModeCalendar, WeeklyCapacityMinutes: 60})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,6 +531,7 @@ func TestPlanTreeImportIntegration(t *testing.T) {
 			GoalID:                goal.ID,
 			Title:                 importTitle,
 			Description:           "由批量导入创建。",
+			Objective:             "完成一轮系统复习",
 			Mode:                  model.PlanModeCalendar,
 			WeeklyCapacityMinutes: 300,
 			Milestones: []ImportMilestoneInput{
@@ -481,6 +688,11 @@ func TestPlanTreeImportIntegration(t *testing.T) {
 	if _, err := service.ImportPlanTree(ctx, userID, key, different); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("want ErrIdempotencyConflict, got %v", err)
 	}
+	differentObjective := payload()
+	differentObjective.Objective = "另一项计划目标"
+	if _, err := service.ImportPlanTree(ctx, userID, key, differentObjective); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changing the objective must change the idempotency digest, got %v", err)
+	}
 	if got := countPlansByTitle(t, db, userID, importTitle); got != plansAfterFirst {
 		t.Fatalf("a conflicting request must not create anything: %d -> %d", plansAfterFirst, got)
 	}
@@ -508,7 +720,7 @@ func TestPlanTreeImportIntegration(t *testing.T) {
 	}
 
 	// 6. An unknown goal fails without claiming the key.
-	if _, err := service.ImportPlanTree(ctx, userID, "import-key-unknown-goal", ImportPlanTreeInput{GoalID: uuid.NewString(), Title: "无主计划", Mode: model.PlanModeCalendar}); !errors.Is(err, ErrNotFound) {
+	if _, err := service.ImportPlanTree(ctx, userID, "import-key-unknown-goal", ImportPlanTreeInput{GoalID: uuid.NewString(), Title: "无主计划", Objective: "验证目标归属", Mode: model.PlanModeCalendar}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 	if got := countRowsForKey(t, db, "import-key-unknown-goal"); got != 0 {
@@ -539,7 +751,7 @@ func TestPlanTreeImportIntegration(t *testing.T) {
 
 	// 8. A sequence plan cannot carry a date.
 	sequence := ImportPlanTreeInput{
-		GoalID: goal.ID, Title: "按课时的导入", Mode: model.PlanModeSequence,
+		GoalID: goal.ID, Title: "按课时的导入", Objective: "按顺序完成全部课时", Mode: model.PlanModeSequence,
 		Milestones: []ImportMilestoneInput{{Title: "课时阶段", Tasks: []ImportTaskInput{
 			{Title: "第一课", ScheduledDate: stringPointer("2026-03-05")},
 		}}},
@@ -672,12 +884,12 @@ func TestTitleLimitsIntegration(t *testing.T) {
 	}
 	// The import path has to accept exactly the same titles.
 	if _, err := service.ImportPlanTree(ctx, userID, "title-limit-key", ImportPlanTreeInput{
-		GoalID: goal.ID, Title: atLimit, Mode: model.PlanModeCalendar,
+		GoalID: goal.ID, Title: atLimit, Objective: "验证标题边界", Mode: model.PlanModeCalendar,
 	}); err != nil {
 		t.Fatalf("the import must accept what the ordinary path accepts: %v", err)
 	}
 	if _, err := service.ImportPlanTree(ctx, userID, "title-limit-key-2", ImportPlanTreeInput{
-		GoalID: goal.ID, Title: atLimit + "汉", Mode: model.PlanModeCalendar,
+		GoalID: goal.ID, Title: atLimit + "汉", Objective: "验证标题边界", Mode: model.PlanModeCalendar,
 	}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("an over-long import title should be rejected, got %v", err)
 	}
