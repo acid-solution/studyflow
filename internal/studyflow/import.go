@@ -13,7 +13,6 @@ import (
 	"studyflow/internal/model"
 
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 // Bounds for one import. They are checked before the idempotency key is claimed
@@ -107,8 +106,8 @@ type PlanImportView struct {
 // The counts are read from the version as it stands now, so they show the size
 // the plan has reached rather than a frozen snapshot of the import.
 func (s *Service) ListPlanImports(ctx context.Context, userID string) ([]PlanImportView, error) {
-	var receipts []model.PlanImport
-	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at DESC, id DESC").Limit(importHistoryLimit).Find(&receipts).Error; err != nil {
+	receipts, err := s.repo.PlanImports(ctx, userID, importHistoryLimit)
+	if err != nil {
 		return nil, err
 	}
 	if len(receipts) == 0 {
@@ -122,22 +121,16 @@ func (s *Service) ListPlanImports(ctx context.Context, userID string) ([]PlanImp
 		planIDs = append(planIDs, receipt.PlanID)
 	}
 
-	var milestoneRows []importCountRow
-	if err := s.db.WithContext(ctx).Model(&model.Milestone{}).
-		Select("plan_version_id, COUNT(*) AS total").
-		Where("user_id = ? AND plan_version_id IN ?", userID, versionIDs).
-		Group("plan_version_id").Scan(&milestoneRows).Error; err != nil {
+	milestoneRows, err := s.repo.CountsByVersion(ctx, userID, versionIDs, true)
+	if err != nil {
 		return nil, err
 	}
-	var taskRows []importCountRow
-	if err := s.db.WithContext(ctx).Model(&model.Task{}).
-		Select("plan_version_id, COUNT(*) AS total").
-		Where("user_id = ? AND plan_version_id IN ?", userID, versionIDs).
-		Group("plan_version_id").Scan(&taskRows).Error; err != nil {
+	taskRows, err := s.repo.CountsByVersion(ctx, userID, versionIDs, false)
+	if err != nil {
 		return nil, err
 	}
-	var plans []model.Plan
-	if err := s.db.WithContext(ctx).Where("user_id = ? AND id IN ?", userID, planIDs).Find(&plans).Error; err != nil {
+	plans, err := s.repo.PlansByIDs(ctx, userID, planIDs)
+	if err != nil {
 		return nil, err
 	}
 
@@ -164,12 +157,7 @@ func (s *Service) ListPlanImports(ctx context.Context, userID string) ([]PlanImp
 	return views, nil
 }
 
-type importCountRow struct {
-	PlanVersionID string
-	Total         int
-}
-
-func countByVersion(rows []importCountRow) map[string]int {
+func countByVersion(rows []VersionCountRow) map[string]int {
 	counts := make(map[string]int, len(rows))
 	for _, row := range rows {
 		counts[row.PlanVersionID] = row.Total
@@ -237,8 +225,8 @@ func (s *Service) ImportPlanTree(ctx context.Context, userID, idempotencyKey str
 	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, Mode: input.Mode, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: parseCanonicalDate(input.StartDate), EndDate: parseCanonicalDate(input.EndDate), StructureRevision: 1}
 	receipt := model.PlanImport{ID: importID, UserID: userID, IdempotencyKey: key, RequestDigest: digest, PlanID: plan.ID, PlanVersionID: version.ID, CreatedAt: s.now().UTC()}
 
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := s.insertPlanWithVersion(ctx, tx, userID, input.GoalID, plan, version); err != nil {
+	err = s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		if err := s.insertPlanWithVersion(ctx, repo, userID, input.GoalID, plan, version); err != nil {
 			return err
 		}
 		// Claim the key before any bulk write. The unique index does the work, so
@@ -247,10 +235,7 @@ func (s *Service) ImportPlanTree(ctx context.Context, userID, idempotencyKey str
 		// because it carries foreign keys to it, but it still precedes every
 		// milestone and task, and because it commits and rolls back together with
 		// the tree a claimed key always has an effect behind it.
-		if err := tx.Create(&receipt).Error; err != nil {
-			if isDuplicate(err) {
-				return errImportReplay
-			}
+		if err := repo.CreatePlanImport(ctx, &receipt); err != nil {
 			return err
 		}
 		for index, group := range input.Milestones {
@@ -258,18 +243,18 @@ func (s *Service) ImportPlanTree(ctx context.Context, userID, idempotencyKey str
 			if err != nil {
 				return err
 			}
-			milestone, err := insertMilestone(tx, userID, version.ID, milestoneInput, uint(index+1))
+			milestone, err := insertMilestone(ctx, repo, userID, version.ID, milestoneInput, uint(index+1))
 			if err != nil {
 				return err
 			}
 			for position, task := range group.Tasks {
-				if err := insertImportedTask(tx, userID, version.ID, &milestone.ID, input.Mode, task, uint(position+1)); err != nil {
+				if err := insertImportedTask(ctx, repo, userID, version.ID, &milestone.ID, input.Mode, task, uint(position+1)); err != nil {
 					return err
 				}
 			}
 		}
 		for position, task := range input.Tasks {
-			if err := insertImportedTask(tx, userID, version.ID, nil, input.Mode, task, uint(position+1)); err != nil {
+			if err := insertImportedTask(ctx, repo, userID, version.ID, nil, input.Mode, task, uint(position+1)); err != nil {
 				return err
 			}
 		}
@@ -279,7 +264,7 @@ func (s *Service) ImportPlanTree(ctx context.Context, userID, idempotencyKey str
 		if errors.Is(err, errImportReplay) {
 			return s.replayImport(ctx, userID, key, digest)
 		}
-		return nil, mapNotFound(err)
+		return nil, err
 	}
 	s.invalidate(ctx, userID)
 	detail, err := s.GetPlan(ctx, userID, plan.ID)
@@ -293,9 +278,9 @@ func (s *Service) ImportPlanTree(ctx context.Context, userID, idempotencyKey str
 // read outside the aborted transaction on purpose: under REPEATABLE READ a read
 // inside it would not see the row the winning request committed.
 func (s *Service) replayImport(ctx context.Context, userID, key, digest string) (*ImportPlanTreeResult, error) {
-	var receipt model.PlanImport
-	if err := s.db.WithContext(ctx).Where("user_id = ? AND idempotency_key = ?", userID, key).First(&receipt).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+	receipt, err := s.repo.PlanImport(ctx, userID, key)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
 			return nil, ErrConflict
 		}
 		return nil, err
@@ -313,7 +298,7 @@ func (s *Service) replayImport(ctx context.Context, userID, key, digest string) 
 // insertImportedTask validates one item and writes it. Validation stays per item
 // so that a failure part-way through the batch rolls back everything already
 // written, which is the guarantee the import promises.
-func insertImportedTask(tx *gorm.DB, userID, versionID string, milestoneID *string, mode string, task ImportTaskInput, position uint) error {
+func insertImportedTask(ctx context.Context, repo Repository, userID, versionID string, milestoneID *string, mode string, task ImportTaskInput, position uint) error {
 	input, date, err := normalizeTaskInput(CreateTaskInput{MilestoneID: milestoneID, Title: task.Title, Description: task.Description, EstimateMinutes: task.EstimateMinutes, ScheduledDate: task.ScheduledDate})
 	if err != nil {
 		return err
@@ -321,7 +306,7 @@ func insertImportedTask(tx *gorm.DB, userID, versionID string, milestoneID *stri
 	if err := validateTaskSchedule(mode, date); err != nil {
 		return err
 	}
-	_, err = insertTask(tx, userID, versionID, input, date, position, model.SourceAgent)
+	_, err = insertTask(ctx, repo, userID, versionID, input, date, position, model.SourceAgent)
 	return err
 }
 

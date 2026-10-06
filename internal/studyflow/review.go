@@ -7,9 +7,6 @@ import (
 	"time"
 
 	"studyflow/internal/model"
-
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type PreferenceView struct {
@@ -56,23 +53,23 @@ type WeeklyReview struct {
 }
 
 func (s *Service) GetPreferences(ctx context.Context, userID string) (*PreferenceView, error) {
-	var value model.UserPreference
-	result := s.db.WithContext(ctx).Where("user_id = ?", userID).First(&value)
-	if result.Error == nil {
-		return preferenceView(value), nil
+	value, err := s.repo.Preference(ctx, userID)
+	if err == nil {
+		return preferenceView(*value), nil
 	}
-	if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-		return nil, result.Error
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
 	}
 	now := s.now().UTC()
-	value = model.UserPreference{UserID: userID, Timezone: "Asia/Shanghai", WeekStart: "monday", DefaultPlanMode: model.PlanModeCalendar, ShowCompletedToday: true, CreatedAt: now, UpdatedAt: now}
-	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&value).Error; err != nil {
+	created := model.UserPreference{UserID: userID, Timezone: "Asia/Shanghai", WeekStart: "monday", DefaultPlanMode: model.PlanModeCalendar, ShowCompletedToday: true, CreatedAt: now, UpdatedAt: now}
+	if err := s.repo.CreatePreferenceIfMissing(ctx, &created); err != nil {
 		return nil, err
 	}
-	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).First(&value).Error; err != nil {
+	value, err = s.repo.Preference(ctx, userID)
+	if err != nil {
 		return nil, err
 	}
-	return preferenceView(value), nil
+	return preferenceView(*value), nil
 }
 
 func (s *Service) UpdatePreferences(ctx context.Context, userID string, input UpdatePreferenceInput) (*PreferenceView, error) {
@@ -106,7 +103,7 @@ func (s *Service) UpdatePreferences(ctx context.Context, userID string, input Up
 	if len(changes) == 0 {
 		return current, nil
 	}
-	if err := s.db.WithContext(ctx).Model(&model.UserPreference{}).Where("user_id = ?", userID).Updates(changes).Error; err != nil {
+	if err := s.repo.UpdatePreference(ctx, userID, changes); err != nil {
 		return nil, err
 	}
 	// Timezone and week start decide how the cached task list marks overdue items
@@ -166,14 +163,14 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 		review.Daily[index].Date = startLocal.AddDate(0, 0, index).Format("2006-01-02")
 	}
 
-	var activePlans []model.Plan
-	if err := s.db.WithContext(ctx).Where("user_id = ? AND status = ? AND active_version_id IS NOT NULL", userID, model.GoalStatusActive).Order("created_at").Find(&activePlans).Error; err != nil {
+	activePlans, err := s.repo.ActivePlans(ctx, userID)
+	if err != nil {
 		return nil, err
 	}
 	planIndex := map[string]int{}
 	for _, plan := range activePlans {
-		var version model.PlanVersion
-		if err := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", *plan.ActiveVersionID, userID).First(&version).Error; err != nil {
+		version, err := s.repo.PlanVersion(ctx, userID, *plan.ActiveVersionID, false)
+		if err != nil {
 			return nil, err
 		}
 		planIndex[plan.ID] = len(review.Plans)
@@ -181,13 +178,8 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 		review.PlannedMinutes += version.WeeklyCapacityMinutes
 	}
 
-	type sessionRow struct {
-		DurationSeconds uint64
-		StartedAt       time.Time
-		PlanID          string
-	}
-	var sessions []sessionRow
-	if err := s.db.WithContext(ctx).Table("study_sessions s").Select("s.duration_seconds, s.started_at, p.id AS plan_id").Joins("JOIN tasks t ON t.id = s.task_id").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id").Where("s.user_id = ? AND s.status = ? AND s.started_at >= ? AND s.started_at < ?", userID, model.SessionStatusFinished, startUTC, endUTC).Scan(&sessions).Error; err != nil {
+	sessions, err := s.repo.ReviewSessions(ctx, userID, startUTC, endUTC)
+	if err != nil {
 		return nil, err
 	}
 	for _, session := range sessions {
@@ -202,14 +194,8 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 		}
 	}
 
-	type completedRow struct {
-		CompletedAt   time.Time
-		ScheduledDate *time.Time
-		PlanID        string
-		PlanMode      string
-	}
-	var completed []completedRow
-	if err := s.db.WithContext(ctx).Table("tasks t").Select("t.completed_at, t.scheduled_date, p.id AS plan_id, pv.mode AS plan_mode").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id").Where("t.user_id = ? AND t.status = ? AND t.completed_at >= ? AND t.completed_at < ?", userID, model.TaskStatusDone, startUTC, endUTC).Scan(&completed).Error; err != nil {
+	completed, err := s.repo.CompletedTasks(ctx, userID, startUTC, endUTC)
+	if err != nil {
 		return nil, err
 	}
 	review.CompletedTasks = len(completed)
@@ -219,12 +205,8 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 		}
 	}
 
-	type scheduledRow struct {
-		ScheduledDate time.Time
-		CompletedAt   *time.Time
-	}
-	var scheduled []scheduledRow
-	if err := s.db.WithContext(ctx).Table("tasks t").Select("t.scheduled_date, t.completed_at").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id AND p.active_version_id = pv.id AND p.status = ?", model.GoalStatusActive).Where("t.user_id = ? AND pv.mode = ? AND t.status <> ? AND t.scheduled_date >= ? AND t.scheduled_date < ?", userID, model.PlanModeCalendar, model.TaskStatusCanceled, startLocal, endLocal).Scan(&scheduled).Error; err != nil {
+	scheduled, err := s.repo.ScheduledTasks(ctx, userID, startLocal, endLocal)
+	if err != nil {
 		return nil, err
 	}
 	review.ScheduledTasks = len(scheduled)
@@ -242,18 +224,14 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 	}
 
 	today := dateOnly(s.now().In(location))
-	var overdue int64
-	if err := s.db.WithContext(ctx).Table("tasks t").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id AND p.active_version_id = pv.id AND p.status = ?", model.GoalStatusActive).Where("t.user_id = ? AND pv.mode = ? AND t.status IN ? AND t.scheduled_date < ?", userID, model.PlanModeCalendar, []string{model.TaskStatusTodo, model.TaskStatusInProgress}, today).Count(&overdue).Error; err != nil {
+	overdue, err := s.repo.CurrentOverdueCount(ctx, userID, today)
+	if err != nil {
 		return nil, err
 	}
 	review.CurrentOverdue = int(overdue)
 
-	type rescheduleRow struct {
-		PlanID string
-		Count  int
-	}
-	var reschedules []rescheduleRow
-	if err := s.db.WithContext(ctx).Table("task_schedule_events e").Select("p.id AS plan_id, COUNT(*) AS count").Joins("JOIN tasks t ON t.id = e.task_id").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id").Where("e.user_id = ? AND e.created_at >= ? AND e.created_at < ?", userID, startUTC, endUTC).Group("p.id").Scan(&reschedules).Error; err != nil {
+	reschedules, err := s.repo.Reschedules(ctx, userID, startUTC, endUTC)
+	if err != nil {
 		return nil, err
 	}
 	for _, item := range reschedules {

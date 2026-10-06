@@ -11,8 +11,6 @@ import (
 	"studyflow/internal/model"
 
 	"github.com/google/uuid"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type CreateMilestoneInput struct {
@@ -85,12 +83,9 @@ func normalizeMilestoneInput(input CreateMilestoneInput) (CreateMilestoneInput, 
 // insertMilestone writes one milestone row. It performs no lookups, no position
 // allocation and no structure bump, so a caller-owned transaction can use it to
 // build a whole plan tree without nesting transactions.
-func insertMilestone(tx *gorm.DB, userID, versionID string, input CreateMilestoneInput, position uint) (*model.Milestone, error) {
+func insertMilestone(ctx context.Context, repo Repository, userID, versionID string, input CreateMilestoneInput, position uint) (*model.Milestone, error) {
 	created := model.Milestone{ID: uuid.NewString(), UserID: userID, PlanVersionID: versionID, Title: input.Title, Outcome: input.Outcome, Position: position}
-	if err := tx.Create(&created).Error; err != nil {
-		if isDuplicate(err) {
-			return nil, ErrConflict
-		}
+	if err := repo.CreateMilestone(ctx, &created); err != nil {
 		return nil, err
 	}
 	return &created, nil
@@ -102,8 +97,8 @@ func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string,
 		return nil, err
 	}
 	var created *model.Milestone
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		version, plan, err := s.versionAndPlan(ctx, tx, userID, versionID, true)
+	err = s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		version, plan, err := s.versionAndPlan(ctx, repo, userID, versionID, true)
 		if err != nil {
 			return err
 		}
@@ -112,18 +107,18 @@ func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string,
 		}
 		position := input.Position
 		if position == 0 {
-			var max uint
-			if err := tx.Model(&model.Milestone{}).Where("plan_version_id = ? AND user_id = ?", versionID, userID).Select("COALESCE(MAX(position), 0)").Scan(&max).Error; err != nil {
+			max, err := repo.MaxMilestonePosition(ctx, userID, versionID)
+			if err != nil {
 				return err
 			}
 			position = max + 1
 		}
-		milestone, err := insertMilestone(tx, userID, versionID, input, position)
+		milestone, err := insertMilestone(ctx, repo, userID, versionID, input, position)
 		if err != nil {
 			return err
 		}
 		created = milestone
-		return bumpStructure(tx, userID, versionID)
+		return repo.BumpStructure(ctx, userID, versionID)
 	})
 	if err != nil {
 		return nil, err
@@ -134,11 +129,13 @@ func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string,
 
 func (s *Service) UpdateMilestone(ctx context.Context, userID, milestoneID string, input UpdateMilestoneInput) (*MilestoneView, error) {
 	var item model.Milestone
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", milestoneID, userID).First(&item).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		found, err := repo.Milestone(ctx, userID, milestoneID, true)
+		if err != nil {
+			return err
 		}
-		version, plan, err := s.versionAndPlan(ctx, tx, userID, item.PlanVersionID, false)
+		item = *found
+		version, plan, err := s.versionAndPlan(ctx, repo, userID, item.PlanVersionID, false)
 		if err != nil {
 			return err
 		}
@@ -163,24 +160,25 @@ func (s *Service) UpdateMilestone(ctx context.Context, userID, milestoneID strin
 			changes["position"] = *input.Position
 		}
 		if len(changes) > 0 {
-			if err := tx.Model(&model.Milestone{}).Where("id = ? AND user_id = ?", item.ID, userID).Updates(changes).Error; err != nil {
-				if isDuplicate(err) {
-					return ErrConflict
-				}
+			if err := repo.UpdateMilestone(ctx, userID, item.ID, changes); err != nil {
 				return err
 			}
-			if err := bumpStructure(tx, userID, item.PlanVersionID); err != nil {
+			if err := repo.BumpStructure(ctx, userID, item.PlanVersionID); err != nil {
 				return err
 			}
 		}
-		return tx.Where("id = ? AND user_id = ?", milestoneID, userID).First(&item).Error
+		found, err = repo.Milestone(ctx, userID, milestoneID, false)
+		if err == nil {
+			item = *found
+		}
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.invalidate(ctx, userID)
-	var tasks []model.Task
-	if err := s.db.WithContext(ctx).Where("milestone_id = ? AND user_id = ?", item.ID, userID).Order("position").Find(&tasks).Error; err != nil {
+	tasks, err := s.repo.TasksByMilestone(ctx, userID, item.ID)
+	if err != nil {
 		return nil, err
 	}
 	view := &MilestoneView{ID: item.ID, Title: item.Title, Outcome: item.Outcome, Position: item.Position}
@@ -191,25 +189,22 @@ func (s *Service) UpdateMilestone(ctx context.Context, userID, milestoneID strin
 }
 
 func (s *Service) DeleteMilestone(ctx context.Context, userID, milestoneID string) error {
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var item model.Milestone
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", milestoneID, userID).First(&item).Error; err != nil {
-			return mapNotFound(err)
+	if err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		item, err := repo.Milestone(ctx, userID, milestoneID, true)
+		if err != nil {
+			return err
 		}
-		version, plan, err := s.versionAndPlan(ctx, tx, userID, item.PlanVersionID, false)
+		version, plan, err := s.versionAndPlan(ctx, repo, userID, item.PlanVersionID, false)
 		if err != nil {
 			return err
 		}
 		if version.Status != model.PlanVersionDraft || plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
-		if err := tx.Where("milestone_id = ? AND user_id = ?", item.ID, userID).Delete(&model.Task{}).Error; err != nil {
+		if err := repo.DeleteMilestoneWithTasks(ctx, userID, item.ID); err != nil {
 			return err
 		}
-		if err := tx.Where("id = ? AND user_id = ?", item.ID, userID).Delete(&model.Milestone{}).Error; err != nil {
-			return err
-		}
-		return bumpStructure(tx, userID, item.PlanVersionID)
+		return repo.BumpStructure(ctx, userID, item.PlanVersionID)
 	}); err != nil {
 		return err
 	}
@@ -244,9 +239,9 @@ func validateTaskSchedule(mode string, date *time.Time) error {
 // insertTask writes one task row. Same contract as insertMilestone: no lookups,
 // no position allocation, no structure bump. The source records whether a person
 // or an agent put it there.
-func insertTask(tx *gorm.DB, userID, versionID string, input CreateTaskInput, date *time.Time, position uint, source string) (*model.Task, error) {
+func insertTask(ctx context.Context, repo Repository, userID, versionID string, input CreateTaskInput, date *time.Time, position uint, source string) (*model.Task, error) {
 	created := model.Task{ID: uuid.NewString(), UserID: userID, PlanVersionID: versionID, MilestoneID: input.MilestoneID, Title: input.Title, Description: input.Description, EstimateMinutes: input.EstimateMinutes, ScheduledDate: date, Position: position, Status: model.TaskStatusTodo, Version: 1, Source: source}
-	if err := tx.Create(&created).Error; err != nil {
+	if err := repo.CreateTask(ctx, &created); err != nil {
 		return nil, err
 	}
 	return &created, nil
@@ -259,8 +254,8 @@ func (s *Service) CreateTask(ctx context.Context, userID, versionID string, inpu
 	}
 	var created *model.Task
 	var plan model.Plan
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		version, foundPlan, err := s.versionAndPlan(ctx, tx, userID, versionID, true)
+	err = s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		version, foundPlan, err := s.versionAndPlan(ctx, repo, userID, versionID, true)
 		if err != nil {
 			return err
 		}
@@ -272,40 +267,34 @@ func (s *Service) CreateTask(ctx context.Context, userID, versionID string, inpu
 			return err
 		}
 		if input.MilestoneID != nil {
-			var count int64
-			if err := tx.Model(&model.Milestone{}).Where("id = ? AND user_id = ? AND plan_version_id = ?", *input.MilestoneID, userID, versionID).Count(&count).Error; err != nil {
+			exists, err := repo.MilestoneExists(ctx, userID, versionID, *input.MilestoneID)
+			if err != nil {
 				return err
 			}
-			if count != 1 {
+			if !exists {
 				return ErrNotFound
 			}
 		}
 		position := input.Position
 		if position == 0 {
-			var max uint
-			query := tx.Model(&model.Task{}).Where("plan_version_id = ? AND user_id = ?", versionID, userID)
-			if input.MilestoneID == nil {
-				query = query.Where("milestone_id IS NULL")
-			} else {
-				query = query.Where("milestone_id = ?", *input.MilestoneID)
-			}
-			if err := query.Select("COALESCE(MAX(position), 0)").Scan(&max).Error; err != nil {
+			max, err := repo.MaxTaskPosition(ctx, userID, versionID, input.MilestoneID)
+			if err != nil {
 				return err
 			}
 			position = max + 1
 		}
-		task, err := insertTask(tx, userID, versionID, input, date, position, model.SourceUser)
+		task, err := insertTask(ctx, repo, userID, versionID, input, date, position, model.SourceUser)
 		if err != nil {
 			return err
 		}
 		created = task
-		return bumpStructure(tx, userID, versionID)
+		return repo.BumpStructure(ctx, userID, versionID)
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.invalidate(ctx, userID)
-	view := taskView(*created, plan.ID, plan.Title, versionMode(s.db, userID, created.PlanVersionID), time.Time{})
+	view := taskView(*created, plan.ID, plan.Title, versionMode(ctx, s.repo, userID, created.PlanVersionID), time.Time{})
 	return &view, nil
 }
 
@@ -315,15 +304,15 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 	}
 	var updated model.Task
 	var plan model.Plan
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var task model.Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		task, err := repo.Task(ctx, userID, taskID, true)
+		if err != nil {
+			return err
 		}
 		if task.Version != input.Version {
 			return ErrVersionConflict
 		}
-		version, foundPlan, err := s.versionAndPlan(ctx, tx, userID, task.PlanVersionID, false)
+		version, foundPlan, err := s.versionAndPlan(ctx, repo, userID, task.PlanVersionID, false)
 		if err != nil {
 			return err
 		}
@@ -334,7 +323,7 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 		if input.RequireCurrentPlan && (version.Status != model.PlanVersionActive || plan.ActiveVersionID == nil || *plan.ActiveVersionID != version.ID) {
 			return ErrInvalidState
 		}
-		changes := map[string]any{"version": gorm.Expr("version + 1")}
+		changes := map[string]any{}
 		structureChanged := false
 		if input.Title != nil {
 			value := strings.TrimSpace(*input.Title)
@@ -363,11 +352,11 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 			changes["milestone_id"] = nil
 			structureChanged = true
 		} else if input.MilestoneID != nil {
-			var count int64
-			if err := tx.Model(&model.Milestone{}).Where("id = ? AND user_id = ? AND plan_version_id = ?", *input.MilestoneID, userID, task.PlanVersionID).Count(&count).Error; err != nil {
+			exists, err := repo.MilestoneExists(ctx, userID, task.PlanVersionID, *input.MilestoneID)
+			if err != nil {
 				return err
 			}
-			if count != 1 {
+			if !exists {
 				return ErrNotFound
 			}
 			changes["milestone_id"] = *input.MilestoneID
@@ -389,11 +378,11 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 			changes["scheduled_date"] = date
 			dateChanged = task.ScheduledDate == nil || !sameDate(*task.ScheduledDate, *date)
 		}
-		result := tx.Model(&model.Task{}).Where("id = ? AND user_id = ? AND version = ?", taskID, userID, input.Version).Updates(changes)
-		if result.Error != nil {
-			return result.Error
+		ok, err := repo.UpdateTask(ctx, userID, taskID, &input.Version, changes, true)
+		if err != nil {
+			return err
 		}
-		if result.RowsAffected != 1 {
+		if !ok {
 			return ErrVersionConflict
 		}
 		if dateChanged {
@@ -402,43 +391,47 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 				newDate, _ = parseDate(*input.ScheduledDate)
 			}
 			event := model.TaskScheduleEvent{ID: uuid.NewString(), UserID: userID, TaskID: taskID, OldScheduledDate: oldDate, NewScheduledDate: newDate, CreatedAt: s.now().UTC()}
-			if err := tx.Create(&event).Error; err != nil {
+			if err := repo.CreateScheduleEvent(ctx, &event); err != nil {
 				return err
 			}
 			structureChanged = true
 		}
 		if structureChanged {
-			if err := bumpStructure(tx, userID, task.PlanVersionID); err != nil {
+			if err := repo.BumpStructure(ctx, userID, task.PlanVersionID); err != nil {
 				return err
 			}
 		}
-		return tx.Where("id = ? AND user_id = ?", taskID, userID).First(&updated).Error
+		value, err := repo.Task(ctx, userID, taskID, false)
+		if err == nil {
+			updated = *value
+		}
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.invalidate(ctx, userID)
-	view := taskView(updated, plan.ID, plan.Title, versionMode(s.db, userID, updated.PlanVersionID), time.Time{})
+	view := taskView(updated, plan.ID, plan.Title, versionMode(ctx, s.repo, userID, updated.PlanVersionID), time.Time{})
 	return &view, nil
 }
 
 func (s *Service) DeleteTask(ctx context.Context, userID, taskID string) error {
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var task model.Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error; err != nil {
-			return mapNotFound(err)
+	if err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		task, err := repo.Task(ctx, userID, taskID, true)
+		if err != nil {
+			return err
 		}
-		version, plan, err := s.versionAndPlan(ctx, tx, userID, task.PlanVersionID, false)
+		version, plan, err := s.versionAndPlan(ctx, repo, userID, task.PlanVersionID, false)
 		if err != nil {
 			return err
 		}
 		if version.Status != model.PlanVersionDraft || plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
-		if err := tx.Where("id = ? AND user_id = ?", task.ID, userID).Delete(&model.Task{}).Error; err != nil {
+		if err := repo.DeleteTask(ctx, userID, task.ID); err != nil {
 			return err
 		}
-		return bumpStructure(tx, userID, task.PlanVersionID)
+		return repo.BumpStructure(ctx, userID, task.PlanVersionID)
 	}); err != nil {
 		return err
 	}
@@ -449,12 +442,12 @@ func (s *Service) DeleteTask(ctx context.Context, userID, taskID string) error {
 func (s *Service) SetTaskStatus(ctx context.Context, userID, taskID, action string) (*TaskView, error) {
 	var updated model.Task
 	var plan model.Plan
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var task model.Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		task, err := repo.Task(ctx, userID, taskID, true)
+		if err != nil {
+			return err
 		}
-		version, foundPlan, err := s.versionAndPlan(ctx, tx, userID, task.PlanVersionID, false)
+		version, foundPlan, err := s.versionAndPlan(ctx, repo, userID, task.PlanVersionID, false)
 		if err != nil {
 			return err
 		}
@@ -466,61 +459,65 @@ func (s *Service) SetTaskStatus(ctx context.Context, userID, taskID, action stri
 		switch action {
 		case "complete":
 			if task.Status == model.TaskStatusDone {
-				updated = task
+				updated = *task
 				return nil
 			}
 			if task.Status == model.TaskStatusCanceled {
 				return ErrInvalidState
 			}
-			if err := finishRunningForTask(tx, userID, taskID, now); err != nil {
+			if err := finishRunningForTask(ctx, repo, userID, taskID, now); err != nil {
 				return err
 			}
-			if err := tx.Model(&model.Task{}).Where("id = ? AND user_id = ?", task.ID, userID).Updates(map[string]any{"status": model.TaskStatusDone, "completed_at": now, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			if _, err := repo.UpdateTask(ctx, userID, task.ID, nil, map[string]any{"status": model.TaskStatusDone, "completed_at": now}, true); err != nil {
 				return err
 			}
 		case "reopen":
 			if task.Status != model.TaskStatusDone {
 				return ErrInvalidState
 			}
-			if err := tx.Model(&model.Task{}).Where("id = ? AND user_id = ?", task.ID, userID).Updates(map[string]any{"status": model.TaskStatusTodo, "completed_at": nil, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			if _, err := repo.UpdateTask(ctx, userID, task.ID, nil, map[string]any{"status": model.TaskStatusTodo, "completed_at": nil}, true); err != nil {
 				return err
 			}
 		case "cancel":
 			if task.Status == model.TaskStatusCanceled {
-				updated = task
+				updated = *task
 				return nil
 			}
-			var running int64
-			if err := tx.Model(&model.StudySession{}).Where("task_id = ? AND user_id = ? AND status = ?", taskID, userID, model.SessionStatusRunning).Count(&running).Error; err != nil {
+			running, err := repo.CountSessions(ctx, userID, taskID, model.SessionStatusRunning)
+			if err != nil {
 				return err
 			}
 			if running > 0 {
 				return ErrConflict
 			}
-			if err := tx.Model(&model.Task{}).Where("id = ? AND user_id = ?", task.ID, userID).Updates(map[string]any{"status": model.TaskStatusCanceled, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			if _, err := repo.UpdateTask(ctx, userID, task.ID, nil, map[string]any{"status": model.TaskStatusCanceled}, true); err != nil {
 				return err
 			}
 		default:
 			return ErrValidation
 		}
-		return tx.Where("id = ? AND user_id = ?", taskID, userID).First(&updated).Error
+		value, err := repo.Task(ctx, userID, taskID, false)
+		if err == nil {
+			updated = *value
+		}
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.invalidate(ctx, userID)
-	view := taskView(updated, plan.ID, plan.Title, versionMode(s.db, userID, updated.PlanVersionID), time.Time{})
+	view := taskView(updated, plan.ID, plan.Title, versionMode(ctx, s.repo, userID, updated.PlanVersionID), time.Time{})
 	return &view, nil
 }
 
 func (s *Service) StartSession(ctx context.Context, userID, taskID string) (*SessionView, error) {
 	var session model.StudySession
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var task model.Task
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", taskID, userID).First(&task).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		task, err := repo.Task(ctx, userID, taskID, true)
+		if err != nil {
+			return err
 		}
-		version, plan, err := s.versionAndPlan(ctx, tx, userID, task.PlanVersionID, false)
+		version, plan, err := s.versionAndPlan(ctx, repo, userID, task.PlanVersionID, false)
 		if err != nil {
 			return err
 		}
@@ -533,14 +530,11 @@ func (s *Service) StartSession(ctx context.Context, userID, taskID string) (*Ses
 		slot := uint8(1)
 		now := s.now().UTC()
 		session = model.StudySession{ID: uuid.NewString(), UserID: userID, TaskID: taskID, StartedAt: now, Status: model.SessionStatusRunning, RunningSlot: &slot, Note: ""}
-		if err := tx.Create(&session).Error; err != nil {
-			if isDuplicate(err) {
-				return ErrConflict
-			}
+		if err := repo.CreateSession(ctx, &session); err != nil {
 			return err
 		}
 		if task.Status == model.TaskStatusTodo {
-			if err := tx.Model(&model.Task{}).Where("id = ? AND user_id = ?", task.ID, userID).Updates(map[string]any{"status": model.TaskStatusInProgress, "version": gorm.Expr("version + 1")}).Error; err != nil {
+			if _, err := repo.UpdateTask(ctx, userID, task.ID, nil, map[string]any{"status": model.TaskStatusInProgress}, true); err != nil {
 				return err
 			}
 		}
@@ -555,15 +549,15 @@ func (s *Service) StartSession(ctx context.Context, userID, taskID string) (*Ses
 }
 
 func (s *Service) ListTaskSessions(ctx context.Context, userID, taskID string) ([]SessionView, error) {
-	var taskCount int64
-	if err := s.db.WithContext(ctx).Model(&model.Task{}).Where("id = ? AND user_id = ?", taskID, userID).Count(&taskCount).Error; err != nil {
+	exists, err := s.repo.TaskExists(ctx, userID, taskID)
+	if err != nil {
 		return nil, err
 	}
-	if taskCount != 1 {
+	if !exists {
 		return nil, ErrNotFound
 	}
-	var sessions []model.StudySession
-	if err := s.db.WithContext(ctx).Where("task_id = ? AND user_id = ?", taskID, userID).Order("started_at DESC, id DESC").Find(&sessions).Error; err != nil {
+	sessions, err := s.repo.SessionsByTask(ctx, userID, taskID)
+	if err != nil {
 		return nil, err
 	}
 	result := make([]SessionView, 0, len(sessions))
@@ -583,10 +577,12 @@ func (s *Service) DiscardSession(ctx context.Context, userID, sessionID string) 
 
 func (s *Service) endSession(ctx context.Context, userID, sessionID, status, note string) (*SessionView, error) {
 	var session model.StudySession
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", sessionID, userID).First(&session).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		found, err := repo.Session(ctx, userID, sessionID, true)
+		if err != nil {
+			return err
 		}
+		session = *found
 		if session.Status != model.SessionStatusRunning {
 			return ErrInvalidState
 		}
@@ -595,21 +591,25 @@ func (s *Service) endSession(ctx context.Context, userID, sessionID, status, not
 		if status == model.SessionStatusFinished && now.After(session.StartedAt) {
 			duration = uint64(now.Sub(session.StartedAt).Seconds())
 		}
-		if err := tx.Model(&model.StudySession{}).Where("id = ? AND user_id = ?", session.ID, userID).Updates(map[string]any{"status": status, "ended_at": now, "duration_seconds": duration, "note": note, "running_slot": nil}).Error; err != nil {
+		if err := repo.UpdateSession(ctx, userID, session.ID, map[string]any{"status": status, "ended_at": now, "duration_seconds": duration, "note": note, "running_slot": nil}); err != nil {
 			return err
 		}
 		if status == model.SessionStatusDiscarded {
-			var finished int64
-			if err := tx.Model(&model.StudySession{}).Where("task_id = ? AND user_id = ? AND status = ?", session.TaskID, userID, model.SessionStatusFinished).Count(&finished).Error; err != nil {
+			finished, err := repo.CountSessions(ctx, userID, session.TaskID, model.SessionStatusFinished)
+			if err != nil {
 				return err
 			}
 			if finished == 0 {
-				if err := tx.Model(&model.Task{}).Where("id = ? AND user_id = ? AND status = ?", session.TaskID, userID, model.TaskStatusInProgress).Updates(map[string]any{"status": model.TaskStatusTodo, "version": gorm.Expr("version + 1")}).Error; err != nil {
+				if err := repo.ResetTaskIfInProgress(ctx, userID, session.TaskID); err != nil {
 					return err
 				}
 			}
 		}
-		return tx.Where("id = ? AND user_id = ?", sessionID, userID).First(&session).Error
+		found, err = repo.Session(ctx, userID, sessionID, false)
+		if err == nil {
+			session = *found
+		}
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -660,33 +660,8 @@ func (s *Service) ListTasks(ctx context.Context, userID string, filter TaskFilte
 }
 
 func (s *Service) loadTasks(ctx context.Context, userID string, filter TaskFilter, today time.Time) ([]TaskView, error) {
-	type row struct {
-		model.Task
-		PlanID    string
-		PlanTitle string
-		PlanMode  string
-	}
-	query := s.db.WithContext(ctx).Table("tasks t").Select("t.*, p.id AS plan_id, p.title AS plan_title, pv.mode AS plan_mode").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id AND p.active_version_id = pv.id AND p.status = ?", model.GoalStatusActive).Where("t.user_id = ?", userID)
-	if filter.GoalID != "" {
-		query = query.Where("p.goal_id = ?", filter.GoalID)
-	}
-	if filter.PlanID != "" {
-		query = query.Where("p.id = ?", filter.PlanID)
-	}
-	if filter.Status != "" {
-		query = query.Where("t.status = ?", filter.Status)
-	}
-	if filter.Query != "" {
-		query = query.Where("t.title LIKE ?", "%"+strings.TrimSpace(filter.Query)+"%")
-	}
-	if filter.From != nil {
-		query = query.Where("t.scheduled_date >= ?", *filter.From)
-	}
-	if filter.To != nil {
-		query = query.Where("t.scheduled_date <= ?", *filter.To)
-	}
-	var rows []row
-	if err := query.Order("t.scheduled_date IS NULL, t.scheduled_date, p.title, t.position, t.id").Scan(&rows).Error; err != nil {
+	rows, err := s.repo.ListTaskRecords(ctx, userID, filter)
+	if err != nil {
 		return nil, err
 	}
 	result := make([]TaskView, 0, len(rows))
@@ -793,65 +768,39 @@ func (s *Service) TodayDashboard(ctx context.Context, userID string) (*Dashboard
 	sortTaskViews(dashboard.Overdue)
 	sortTaskViews(dashboard.Today)
 	sortTaskViews(dashboard.Future)
-	type sessionRow struct {
-		model.StudySession
-		TaskTitle     string
-		PlanID        string
-		PlanTitle     string
-		PlanMode      string
-		PlanVersionID string
-		TaskVersion   uint
-		TaskStatus    string
-	}
-	var running sessionRow
-	if err := s.db.WithContext(ctx).Table("study_sessions s").Select("s.*, t.title AS task_title, t.plan_version_id, t.version AS task_version, t.status AS task_status, p.id AS plan_id, p.title AS plan_title, pv.mode AS plan_mode").Joins("JOIN tasks t ON t.id = s.task_id").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Joins("JOIN plans p ON p.id = pv.plan_id").Where("s.user_id = ? AND s.status = ?", userID, model.SessionStatusRunning).Take(&running).Error; err == nil {
+	running, err := s.repo.RunningSessionRecord(ctx, userID)
+	if err == nil {
 		task := TaskView{ID: running.TaskID, PlanID: running.PlanID, PlanTitle: running.PlanTitle, PlanMode: running.PlanMode, PlanVersionID: running.PlanVersionID, Title: running.TaskTitle, Status: running.TaskStatus, Version: running.TaskVersion}
 		dashboard.RunningSession = &RunningSessionView{Session: sessionView(running.StudySession), Task: task}
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
 	return dashboard, nil
 }
 
-func (s *Service) versionAndPlan(ctx context.Context, db *gorm.DB, userID, versionID string, lock bool) (*model.PlanVersion, *model.Plan, error) {
-	query := db.WithContext(ctx)
-	if lock {
-		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+func (s *Service) versionAndPlan(ctx context.Context, repo Repository, userID, versionID string, lock bool) (*model.PlanVersion, *model.Plan, error) {
+	version, err := repo.PlanVersion(ctx, userID, versionID, lock)
+	if err != nil {
+		return nil, nil, err
 	}
-	var version model.PlanVersion
-	if err := query.Where("id = ? AND user_id = ?", versionID, userID).First(&version).Error; err != nil {
-		return nil, nil, mapNotFound(err)
+	plan, err := repo.Plan(ctx, userID, version.PlanID, false)
+	if err != nil {
+		return nil, nil, err
 	}
-	var plan model.Plan
-	if err := db.WithContext(ctx).Where("id = ? AND user_id = ?", version.PlanID, userID).First(&plan).Error; err != nil {
-		return nil, nil, mapNotFound(err)
-	}
-	return &version, &plan, nil
+	return version, plan, nil
 }
 
-func versionMode(db *gorm.DB, userID, versionID string) string {
-	var version model.PlanVersion
-	if err := db.Where("id = ? AND user_id = ?", versionID, userID).Select("mode").First(&version).Error; err != nil {
+func versionMode(ctx context.Context, repo Repository, userID, versionID string) string {
+	version, err := repo.PlanVersion(ctx, userID, versionID, false)
+	if err != nil {
 		return ""
 	}
 	return version.Mode
 }
 
-func bumpStructure(tx *gorm.DB, userID, versionID string) error {
-	result := tx.Model(&model.PlanVersion{}).Where("id = ? AND user_id = ?", versionID, userID).Update("structure_revision", gorm.Expr("structure_revision + 1"))
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-func finishRunningForTask(tx *gorm.DB, userID, taskID string, now time.Time) error {
-	var session model.StudySession
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("task_id = ? AND user_id = ? AND status = ?", taskID, userID, model.SessionStatusRunning).First(&session).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+func finishRunningForTask(ctx context.Context, repo Repository, userID, taskID string, now time.Time) error {
+	session, err := repo.RunningSessionForTask(ctx, userID, taskID, true)
+	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
 	if err != nil {
@@ -861,7 +810,7 @@ func finishRunningForTask(tx *gorm.DB, userID, taskID string, now time.Time) err
 	if now.After(session.StartedAt) {
 		duration = uint64(now.Sub(session.StartedAt).Seconds())
 	}
-	return tx.Model(&model.StudySession{}).Where("id = ? AND user_id = ?", session.ID, userID).Updates(map[string]any{"status": model.SessionStatusFinished, "ended_at": now, "duration_seconds": duration, "running_slot": nil}).Error
+	return repo.UpdateSession(ctx, userID, session.ID, map[string]any{"status": model.SessionStatusFinished, "ended_at": now, "duration_seconds": duration, "running_slot": nil})
 }
 
 func sessionView(session model.StudySession) SessionView {

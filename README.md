@@ -23,12 +23,28 @@ StudyFlow 是面向个人学习执行的多用户平台。用户可以把长期�
 | 层次 | 技术 |
 | --- | --- |
 | 前端 | React 19、TypeScript、Vite、Vitest |
-| API | Go、Gin、GORM |
+| API | Go、Gin、Repository、GORM |
 | 数据库 | MySQL 8.4、Goose Migration |
 | 身份 | shared-auth、RS256 JWT、JWKS |
 | 工程 | Docker Compose、GitHub Actions |
 
 首轮没有引入 Redis。周报和工作台直接从 MySQL 查询，后续只有在真实性能数据证明需要时才增加缓存。
+
+## 后端分层
+
+```text
+HTTP / MCP Handler
+        ↓
+Service（业务规则、事务编排、缓存失效）
+        ↓
+Repository 接口（领域化持久化操作）
+        ↓
+GORM Repository
+        ↓
+MySQL
+```
+
+`Service` 不依赖 GORM，也不直接拼接 SQL 条件。事务由 Service 按完整业务动作划定，`WithinTransaction` 会把同一个事务范围内的 Repository 传给回调；行锁、唯一键错误、聚合查询和 ORM 细节全部留在 GORM 实现中。这样 HTTP 与 MCP 继续共用同一套业务规则，同时可以用替代 Repository 对 Service 做独立测试。
 
 ## 核心数据关系
 
@@ -57,7 +73,7 @@ studyflow/
 │  ├─ middleware/            请求 ID 与结构化日志
 │  ├─ model/                 持久化模型
 │  ├─ response/              统一响应
-│  └─ studyflow/             领域服务与 HTTP 接口
+│  └─ studyflow/             HTTP/MCP、领域服务、Repository 接口与 GORM 实现
 ├─ compose.yaml
 ├─ Dockerfile
 └─ main.go

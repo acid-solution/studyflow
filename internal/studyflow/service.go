@@ -11,10 +11,7 @@ import (
 
 	"studyflow/internal/model"
 
-	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 var (
@@ -57,23 +54,9 @@ func titleTooLong(value string, limit int) bool {
 }
 
 type Service struct {
-	db    *gorm.DB
+	repo  Repository
 	now   func() time.Time
 	cache Cache
-}
-
-// NewService builds a service with caching switched off.
-func NewService(db *gorm.DB) *Service {
-	return &Service{db: db, now: time.Now, cache: noopCache{}}
-}
-
-// NewServiceWithCache builds a service that reads its aggregate queries through
-// the given cache. Passing nil is the same as NewService.
-func NewServiceWithCache(db *gorm.DB, cache Cache) *Service {
-	if cache == nil {
-		return NewService(db)
-	}
-	return &Service{db: db, now: time.Now, cache: cache}
 }
 
 type CreateGoalInput struct {
@@ -284,7 +267,7 @@ func (s *Service) CreateGoal(ctx context.Context, userID string, input CreateGoa
 		Status: model.GoalStatusActive, Version: 1,
 	}
 	if input.ParentGoalID != nil {
-		parent, err := s.getGoal(ctx, s.db, userID, *input.ParentGoalID, false)
+		parent, err := s.repo.Goal(ctx, userID, *input.ParentGoalID, false)
 		if err != nil {
 			return nil, err
 		}
@@ -292,7 +275,7 @@ func (s *Service) CreateGoal(ctx context.Context, userID string, input CreateGoa
 			return nil, ErrInvalidState
 		}
 	}
-	if err := s.db.WithContext(ctx).Create(&goal).Error; err != nil {
+	if err := s.repo.CreateGoal(ctx, &goal); err != nil {
 		return nil, err
 	}
 	s.invalidate(ctx, userID)
@@ -302,8 +285,8 @@ func (s *Service) CreateGoal(ctx context.Context, userID string, input CreateGoa
 
 func (s *Service) UpdateGoal(ctx context.Context, userID, goalID string, input UpdateGoalInput) (*GoalNode, error) {
 	var updated model.Goal
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		goal, err := s.getGoal(ctx, tx, userID, goalID, true)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
 		}
@@ -313,7 +296,7 @@ func (s *Service) UpdateGoal(ctx context.Context, userID, goalID string, input U
 		if input.Version == 0 || goal.Version != input.Version {
 			return ErrVersionConflict
 		}
-		changes := map[string]any{"version": gorm.Expr("version + 1")}
+		changes := map[string]any{}
 		if input.Title != nil {
 			title := strings.TrimSpace(*input.Title)
 			if title == "" {
@@ -345,10 +328,10 @@ func (s *Service) UpdateGoal(ctx context.Context, userID, goalID string, input U
 			if *input.ParentGoalID == goalID {
 				return fmt.Errorf("%w: goal cycle", ErrValidation)
 			}
-			if err := s.ensureNoGoalCycle(ctx, tx, userID, goalID, *input.ParentGoalID); err != nil {
+			if err := s.ensureNoGoalCycle(ctx, repo, userID, goalID, *input.ParentGoalID); err != nil {
 				return err
 			}
-			parent, err := s.getGoal(ctx, tx, userID, *input.ParentGoalID, false)
+			parent, err := repo.Goal(ctx, userID, *input.ParentGoalID, false)
 			if err != nil {
 				return err
 			}
@@ -357,17 +340,21 @@ func (s *Service) UpdateGoal(ctx context.Context, userID, goalID string, input U
 			}
 			changes["parent_goal_id"] = *input.ParentGoalID
 		}
-		result := tx.Model(&model.Goal{}).Where("id = ? AND user_id = ? AND version = ?", goalID, userID, input.Version).Updates(changes)
-		if result.Error != nil {
-			return result.Error
+		ok, err := repo.UpdateGoal(ctx, userID, goalID, &input.Version, changes, true)
+		if err != nil {
+			return err
 		}
-		if result.RowsAffected != 1 {
+		if !ok {
 			return ErrVersionConflict
 		}
-		return tx.Where("id = ? AND user_id = ?", goalID, userID).First(&updated).Error
+		value, err := repo.Goal(ctx, userID, goalID, false)
+		if err == nil {
+			updated = *value
+		}
+		return err
 	})
 	if err != nil {
-		return nil, mapNotFound(err)
+		return nil, err
 	}
 	s.invalidate(ctx, userID)
 	node := goalNode(updated)
@@ -375,8 +362,8 @@ func (s *Service) UpdateGoal(ctx context.Context, userID, goalID string, input U
 }
 
 func (s *Service) CompleteGoal(ctx context.Context, userID, goalID string, input CompletionInput) (*GoalNode, error) {
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		goal, err := s.getGoal(ctx, tx, userID, goalID, true)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
 		}
@@ -386,7 +373,7 @@ func (s *Service) CompleteGoal(ctx context.Context, userID, goalID string, input
 		if goal.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
-		summary, err := s.goalCompletionSummary(ctx, tx, userID, goalID)
+		summary, err := s.goalCompletionSummary(ctx, repo, userID, goalID)
 		if err != nil {
 			return err
 		}
@@ -397,7 +384,8 @@ func (s *Service) CompleteGoal(ctx context.Context, userID, goalID string, input
 			return &CompletionConfirmationError{Scope: "goal", Summary: summary}
 		}
 		now := s.now().UTC()
-		return tx.Model(&model.Goal{}).Where("id = ? AND user_id = ?", goalID, userID).Updates(map[string]any{"status": model.GoalStatusAchieved, "achieved_at": now, "version": gorm.Expr("version + 1")}).Error
+		_, err = repo.UpdateGoal(ctx, userID, goalID, nil, map[string]any{"status": model.GoalStatusAchieved, "achieved_at": now}, true)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -407,8 +395,8 @@ func (s *Service) CompleteGoal(ctx context.Context, userID, goalID string, input
 }
 
 func (s *Service) AbandonGoal(ctx context.Context, userID, goalID string, input AbandonInput) (*GoalNode, error) {
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		goal, err := s.getGoal(ctx, tx, userID, goalID, true)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
 		}
@@ -425,7 +413,8 @@ func (s *Service) AbandonGoal(ctx context.Context, userID, goalID string, input 
 			}
 			excluded = input.ParentEffect == "exclude"
 		}
-		return tx.Model(&model.Goal{}).Where("id = ? AND user_id = ?", goalID, userID).Updates(map[string]any{"status": model.GoalStatusAbandoned, "achieved_at": nil, "excluded_from_parent_completion": excluded, "version": gorm.Expr("version + 1")}).Error
+		_, err = repo.UpdateGoal(ctx, userID, goalID, nil, map[string]any{"status": model.GoalStatusAbandoned, "achieved_at": nil, "excluded_from_parent_completion": excluded}, true)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -435,22 +424,23 @@ func (s *Service) AbandonGoal(ctx context.Context, userID, goalID string, input 
 }
 
 func (s *Service) ReopenGoal(ctx context.Context, userID, goalID string) (*GoalNode, error) {
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		goal, err := s.getGoal(ctx, tx, userID, goalID, true)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
 		}
 		if goal.Status == model.GoalStatusActive {
 			return nil
 		}
-		ancestors, err := s.inactiveGoalAncestors(ctx, tx, userID, goal.ParentGoalID)
+		ancestors, err := s.inactiveGoalAncestors(ctx, repo, userID, goal.ParentGoalID)
 		if err != nil {
 			return err
 		}
 		if len(ancestors) > 0 {
 			return &AncestorStateError{Ancestors: ancestors}
 		}
-		return tx.Model(&model.Goal{}).Where("id = ? AND user_id = ?", goalID, userID).Updates(map[string]any{"status": model.GoalStatusActive, "achieved_at": nil, "excluded_from_parent_completion": false, "version": gorm.Expr("version + 1")}).Error
+		_, err = repo.UpdateGoal(ctx, userID, goalID, nil, map[string]any{"status": model.GoalStatusActive, "achieved_at": nil, "excluded_from_parent_completion": false}, true)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -463,15 +453,16 @@ func (s *Service) UpdateGoalCompletionPolicy(ctx context.Context, userID, goalID
 	if input.ParentEffect != "block" && input.ParentEffect != "exclude" {
 		return nil, ErrValidation
 	}
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		goal, err := s.getGoal(ctx, tx, userID, goalID, true)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
 		}
 		if goal.ParentGoalID == nil || goal.Status != model.GoalStatusAbandoned {
 			return ErrInvalidState
 		}
-		return tx.Model(&model.Goal{}).Where("id = ? AND user_id = ?", goalID, userID).Updates(map[string]any{"excluded_from_parent_completion": input.ParentEffect == "exclude", "version": gorm.Expr("version + 1")}).Error
+		_, err = repo.UpdateGoal(ctx, userID, goalID, nil, map[string]any{"excluded_from_parent_completion": input.ParentEffect == "exclude"}, true)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -502,20 +493,20 @@ func (s *Service) GoalTree(ctx context.Context, userID string) ([]*GoalNode, err
 
 // loadGoalTree reads the tree straight from MySQL.
 func (s *Service) loadGoalTree(ctx context.Context, userID string) ([]*GoalNode, error) {
-	var goals []model.Goal
-	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at, id").Find(&goals).Error; err != nil {
+	goals, err := s.repo.Goals(ctx, userID)
+	if err != nil {
 		return nil, err
 	}
-	var plans []model.Plan
-	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at, id").Find(&plans).Error; err != nil {
+	plans, err := s.repo.Plans(ctx, userID, PlanRepositoryFilter{OldestFirst: true})
+	if err != nil {
 		return nil, err
 	}
-	var versions []model.PlanVersion
-	if err := s.db.WithContext(ctx).Where("user_id = ? AND status IN ?", userID, []string{model.PlanVersionActive, model.PlanVersionDraft}).Find(&versions).Error; err != nil {
+	versions, err := s.repo.PlanVersionsByStatus(ctx, userID, []string{model.PlanVersionActive, model.PlanVersionDraft})
+	if err != nil {
 		return nil, err
 	}
-	var tasks []model.Task
-	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Find(&tasks).Error; err != nil {
+	tasks, err := s.repo.Tasks(ctx, userID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -648,18 +639,18 @@ func normalizePlanInput(input CreatePlanInput) (CreatePlanInput, *time.Time, *ti
 // insertPlanWithVersion writes a plan together with its first draft version. It
 // performs no version bookkeeping, so a caller-owned transaction can use it to
 // build a whole plan tree without nesting transactions.
-func (s *Service) insertPlanWithVersion(ctx context.Context, tx *gorm.DB, userID, goalID string, plan model.Plan, version model.PlanVersion) error {
-	goal, err := s.getGoal(ctx, tx, userID, goalID, false)
+func (s *Service) insertPlanWithVersion(ctx context.Context, repo Repository, userID, goalID string, plan model.Plan, version model.PlanVersion) error {
+	goal, err := repo.Goal(ctx, userID, goalID, false)
 	if err != nil {
 		return err
 	}
 	if goal.Status != model.GoalStatusActive {
 		return ErrInvalidState
 	}
-	if err := tx.Create(&plan).Error; err != nil {
+	if err := repo.CreatePlan(ctx, &plan); err != nil {
 		return err
 	}
-	return tx.Create(&version).Error
+	return repo.CreatePlanVersion(ctx, &version)
 }
 
 func (s *Service) CreatePlan(ctx context.Context, userID, goalID string, input CreatePlanInput) (*PlanDetail, error) {
@@ -669,10 +660,10 @@ func (s *Service) CreatePlan(ctx context.Context, userID, goalID string, input C
 	}
 	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: goalID, Title: input.Title, Description: input.Description, Objective: input.Objective, SuccessCriteria: input.SuccessCriteria, TargetDate: targetDate, Status: model.GoalStatusActive, Revision: 1, Source: model.SourceUser}
 	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, Mode: input.Mode, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: startDate, EndDate: endDate, StructureRevision: 1}
-	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return s.insertPlanWithVersion(ctx, tx, userID, goalID, plan, version)
+	if err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		return s.insertPlanWithVersion(ctx, repo, userID, goalID, plan, version)
 	}); err != nil {
-		return nil, mapNotFound(err)
+		return nil, err
 	}
 	s.invalidate(ctx, userID)
 	return s.GetPlan(ctx, userID, plan.ID)
@@ -682,10 +673,10 @@ func (s *Service) UpdatePlan(ctx context.Context, userID, planID string, input U
 	if input.Revision == 0 {
 		return nil, ErrValidation
 	}
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var plan model.Plan
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		plan, err := repo.Plan(ctx, userID, planID, true)
+		if err != nil {
+			return err
 		}
 		if plan.Revision != input.Revision {
 			return ErrVersionConflict
@@ -693,7 +684,7 @@ func (s *Service) UpdatePlan(ctx context.Context, userID, planID string, input U
 		if plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
-		changes := map[string]any{"revision": gorm.Expr("revision + 1")}
+		changes := map[string]any{}
 		if input.Title != nil {
 			value := strings.TrimSpace(*input.Title)
 			if value == "" || titleTooLong(value, titleLimitPlan) {
@@ -724,7 +715,7 @@ func (s *Service) UpdatePlan(ctx context.Context, userID, planID string, input U
 			changes["target_date"] = value
 		}
 		if input.GoalID != nil && *input.GoalID != plan.GoalID {
-			goal, err := s.getGoal(ctx, tx, userID, *input.GoalID, false)
+			goal, err := repo.Goal(ctx, userID, *input.GoalID, false)
 			if err != nil {
 				return err
 			}
@@ -733,11 +724,11 @@ func (s *Service) UpdatePlan(ctx context.Context, userID, planID string, input U
 			}
 			changes["goal_id"] = *input.GoalID
 		}
-		result := tx.Model(&model.Plan{}).Where("id = ? AND user_id = ? AND revision = ?", planID, userID, input.Revision).Updates(changes)
-		if result.Error != nil {
-			return result.Error
+		ok, err := repo.UpdatePlan(ctx, userID, planID, &input.Revision, changes, true)
+		if err != nil {
+			return err
 		}
-		if result.RowsAffected != 1 {
+		if !ok {
 			return ErrVersionConflict
 		}
 		return nil
@@ -750,10 +741,10 @@ func (s *Service) UpdatePlan(ctx context.Context, userID, planID string, input U
 }
 
 func (s *Service) CompletePlan(ctx context.Context, userID, planID string, input CompletionInput) (*PlanDetail, error) {
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var plan model.Plan
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		plan, err := repo.Plan(ctx, userID, planID, true)
+		if err != nil {
+			return err
 		}
 		if plan.Status == model.GoalStatusAchieved {
 			return nil
@@ -761,7 +752,7 @@ func (s *Service) CompletePlan(ctx context.Context, userID, planID string, input
 		if plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
-		summary, err := s.planCompletionSummary(ctx, tx, userID, plan)
+		summary, err := s.planCompletionSummary(ctx, repo, userID, *plan)
 		if err != nil {
 			return err
 		}
@@ -769,8 +760,8 @@ func (s *Service) CompletePlan(ctx context.Context, userID, planID string, input
 			return &CompletionConfirmationError{Scope: "plan", Summary: summary}
 		}
 		if plan.ActiveVersionID != nil {
-			var running int64
-			if err := tx.Table("study_sessions s").Joins("JOIN tasks t ON t.id = s.task_id").Where("s.user_id = ? AND s.status = ? AND t.plan_version_id = ?", userID, model.SessionStatusRunning, *plan.ActiveVersionID).Count(&running).Error; err != nil {
+			running, err := repo.CountRunningSessionsForVersion(ctx, userID, *plan.ActiveVersionID)
+			if err != nil {
 				return err
 			}
 			if running > 0 {
@@ -778,7 +769,8 @@ func (s *Service) CompletePlan(ctx context.Context, userID, planID string, input
 			}
 		}
 		now := s.now().UTC()
-		return tx.Model(&model.Plan{}).Where("id = ? AND user_id = ?", planID, userID).Updates(map[string]any{"status": model.GoalStatusAchieved, "achieved_at": now, "revision": gorm.Expr("revision + 1")}).Error
+		_, err = repo.UpdatePlan(ctx, userID, planID, nil, map[string]any{"status": model.GoalStatusAchieved, "achieved_at": now}, true)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -791,10 +783,10 @@ func (s *Service) AbandonPlan(ctx context.Context, userID, planID string, input 
 	if input.ParentEffect != "block" && input.ParentEffect != "exclude" {
 		return nil, ErrValidation
 	}
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var plan model.Plan
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		plan, err := repo.Plan(ctx, userID, planID, true)
+		if err != nil {
+			return err
 		}
 		if plan.Status == model.GoalStatusAbandoned {
 			return nil
@@ -802,14 +794,15 @@ func (s *Service) AbandonPlan(ctx context.Context, userID, planID string, input 
 		if plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
-		var running int64
-		if err := tx.Table("study_sessions s").Joins("JOIN tasks t ON t.id = s.task_id").Joins("JOIN plan_versions pv ON pv.id = t.plan_version_id").Where("s.user_id = ? AND s.status = ? AND pv.plan_id = ?", userID, model.SessionStatusRunning, planID).Count(&running).Error; err != nil {
+		running, err := repo.CountRunningSessionsForPlan(ctx, userID, planID)
+		if err != nil {
 			return err
 		}
 		if running > 0 {
 			return ErrConflict
 		}
-		return tx.Model(&model.Plan{}).Where("id = ? AND user_id = ?", planID, userID).Updates(map[string]any{"status": model.GoalStatusAbandoned, "achieved_at": nil, "excluded_from_goal_completion": input.ParentEffect == "exclude", "revision": gorm.Expr("revision + 1")}).Error
+		_, err = repo.UpdatePlan(ctx, userID, planID, nil, map[string]any{"status": model.GoalStatusAbandoned, "achieved_at": nil, "excluded_from_goal_completion": input.ParentEffect == "exclude"}, true)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -819,22 +812,23 @@ func (s *Service) AbandonPlan(ctx context.Context, userID, planID string, input 
 }
 
 func (s *Service) ReopenPlan(ctx context.Context, userID, planID string) (*PlanDetail, error) {
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var plan model.Plan
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		plan, err := repo.Plan(ctx, userID, planID, true)
+		if err != nil {
+			return err
 		}
 		if plan.Status == model.GoalStatusActive {
 			return nil
 		}
-		ancestors, err := s.inactiveGoalAncestors(ctx, tx, userID, &plan.GoalID)
+		ancestors, err := s.inactiveGoalAncestors(ctx, repo, userID, &plan.GoalID)
 		if err != nil {
 			return err
 		}
 		if len(ancestors) > 0 {
 			return &AncestorStateError{Ancestors: ancestors}
 		}
-		return tx.Model(&model.Plan{}).Where("id = ? AND user_id = ?", planID, userID).Updates(map[string]any{"status": model.GoalStatusActive, "achieved_at": nil, "excluded_from_goal_completion": false, "revision": gorm.Expr("revision + 1")}).Error
+		_, err = repo.UpdatePlan(ctx, userID, planID, nil, map[string]any{"status": model.GoalStatusActive, "achieved_at": nil, "excluded_from_goal_completion": false}, true)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -847,15 +841,16 @@ func (s *Service) UpdatePlanCompletionPolicy(ctx context.Context, userID, planID
 	if input.ParentEffect != "block" && input.ParentEffect != "exclude" {
 		return nil, ErrValidation
 	}
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var plan model.Plan
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		plan, err := repo.Plan(ctx, userID, planID, true)
+		if err != nil {
+			return err
 		}
 		if plan.Status != model.GoalStatusAbandoned {
 			return ErrInvalidState
 		}
-		return tx.Model(&model.Plan{}).Where("id = ? AND user_id = ?", planID, userID).Updates(map[string]any{"excluded_from_goal_completion": input.ParentEffect == "exclude", "revision": gorm.Expr("revision + 1")}).Error
+		_, err = repo.UpdatePlan(ctx, userID, planID, nil, map[string]any{"excluded_from_goal_completion": input.ParentEffect == "exclude"}, true)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -865,44 +860,47 @@ func (s *Service) UpdatePlanCompletionPolicy(ctx context.Context, userID, planID
 }
 
 func (s *Service) ListPlans(ctx context.Context, userID, goalID, mode, status string) ([]PlanSummary, error) {
-	query := s.db.WithContext(ctx).Where("user_id = ?", userID)
-	if goalID != "" {
-		query = query.Where("goal_id = ?", goalID)
-	}
-	if status != "" {
-		query = query.Where("status = ?", status)
-	}
-	var plans []model.Plan
-	if err := query.Order("created_at DESC").Find(&plans).Error; err != nil {
+	plans, err := s.repo.Plans(ctx, userID, PlanRepositoryFilter{GoalID: goalID, Status: status})
+	if err != nil {
 		return nil, err
 	}
 	result := make([]PlanSummary, 0, len(plans))
 	for _, plan := range plans {
 		summary := planSummary(plan)
 		if plan.ActiveVersionID != nil {
-			var version model.PlanVersion
-			if err := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", *plan.ActiveVersionID, userID).First(&version).Error; err == nil {
+			version, err := s.repo.PlanVersion(ctx, userID, *plan.ActiveVersionID, false)
+			if err == nil {
 				n := version.VersionNo
 				summary.ActiveVersionNo = &n
 				summary.CurrentMode = version.Mode
-			}
-			var total, done int64
-			if err := s.db.WithContext(ctx).Model(&model.Task{}).Where("plan_version_id = ? AND user_id = ? AND status <> ?", *plan.ActiveVersionID, userID, model.TaskStatusCanceled).Count(&total).Error; err != nil {
+			} else if !errors.Is(err, ErrNotFound) {
 				return nil, err
 			}
-			if err := s.db.WithContext(ctx).Model(&model.Task{}).Where("plan_version_id = ? AND user_id = ? AND status = ?", *plan.ActiveVersionID, userID, model.TaskStatusDone).Count(&done).Error; err != nil {
+			total, err := s.repo.CountTasks(ctx, userID, *plan.ActiveVersionID, nil, []string{model.TaskStatusCanceled})
+			if err != nil {
+				return nil, err
+			}
+			done, err := s.repo.CountTasks(ctx, userID, *plan.ActiveVersionID, []string{model.TaskStatusDone}, nil)
+			if err != nil {
 				return nil, err
 			}
 			summary.TotalTasks, summary.DoneTasks = int(total), int(done)
 			summary.CompletionSummary = PlanCompletionSummary{HasActiveVersion: true, TotalTasks: int(total), DoneTasks: int(done), OpenTasks: int(total - done)}
 		}
-		var draft model.PlanVersion
-		if err := s.db.WithContext(ctx).Where("plan_id = ? AND user_id = ? AND status = ?", plan.ID, userID, model.PlanVersionDraft).Order("version_no DESC").First(&draft).Error; err == nil {
+		versions, err := s.repo.PlanVersions(ctx, userID, plan.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, draft := range versions {
+			if draft.Status != model.PlanVersionDraft {
+				continue
+			}
 			id := draft.ID
 			summary.DraftVersionID = &id
 			if summary.CurrentMode == "" {
 				summary.CurrentMode = draft.Mode
 			}
+			break
 		}
 		if mode == "" || summary.CurrentMode == mode {
 			result = append(result, summary)
@@ -912,19 +910,19 @@ func (s *Service) ListPlans(ctx context.Context, userID, goalID, mode, status st
 }
 
 func (s *Service) GetPlan(ctx context.Context, userID, planID string) (*PlanDetail, error) {
-	var plan model.Plan
-	if err := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-		return nil, mapNotFound(err)
-	}
-	var versions []model.PlanVersion
-	if err := s.db.WithContext(ctx).Where("plan_id = ? AND user_id = ?", planID, userID).Order("version_no DESC").Find(&versions).Error; err != nil {
-		return nil, err
-	}
-	completion, err := s.planCompletionSummary(ctx, s.db, userID, plan)
+	plan, err := s.repo.Plan(ctx, userID, planID, false)
 	if err != nil {
 		return nil, err
 	}
-	detail := &PlanDetail{Plan: planView(plan, completion)}
+	versions, err := s.repo.PlanVersions(ctx, userID, planID)
+	if err != nil {
+		return nil, err
+	}
+	completion, err := s.planCompletionSummary(ctx, s.repo, userID, *plan)
+	if err != nil {
+		return nil, err
+	}
+	detail := &PlanDetail{Plan: planView(*plan, completion)}
 	for _, version := range versions {
 		view, err := s.versionView(ctx, userID, version)
 		if err != nil {
@@ -937,23 +935,23 @@ func (s *Service) GetPlan(ctx context.Context, userID, planID string) (*PlanDeta
 
 func (s *Service) CreatePlanVersion(ctx context.Context, userID, planID string, input CreatePlanVersionInput) (*VersionView, error) {
 	var created model.PlanVersion
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var plan model.Plan
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		plan, err := repo.Plan(ctx, userID, planID, true)
+		if err != nil {
+			return err
 		}
 		if plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
-		var existing int64
-		if err := tx.Model(&model.PlanVersion{}).Where("plan_id = ? AND user_id = ? AND status = ?", planID, userID, model.PlanVersionDraft).Count(&existing).Error; err != nil {
+		existing, err := repo.CountPlanVersions(ctx, userID, planID, model.PlanVersionDraft)
+		if err != nil {
 			return err
 		}
 		if existing > 0 {
 			return ErrConflict
 		}
-		var maxVersion uint
-		if err := tx.Model(&model.PlanVersion{}).Where("plan_id = ? AND user_id = ?", planID, userID).Select("COALESCE(MAX(version_no), 0)").Scan(&maxVersion).Error; err != nil {
+		maxVersion, err := repo.MaxPlanVersionNumber(ctx, userID, planID)
+		if err != nil {
 			return err
 		}
 		created = model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: planID, VersionNo: maxVersion + 1, Status: model.PlanVersionDraft, StructureRevision: 1}
@@ -979,42 +977,37 @@ func (s *Service) CreatePlanVersion(ctx context.Context, userID, planID string, 
 			if input.SourceVersionID == nil || strings.TrimSpace(*input.SourceVersionID) == "" {
 				return ErrValidation
 			}
-			var value model.PlanVersion
-			if err := tx.Where("id = ? AND plan_id = ? AND user_id = ?", *input.SourceVersionID, planID, userID).First(&value).Error; err != nil {
-				return mapNotFound(err)
+			value, err := repo.PlanVersionInPlan(ctx, userID, planID, *input.SourceVersionID)
+			if err != nil {
+				return err
 			}
-			source = &value
+			source = value
 			sourceID := value.ID
 			created.SourceVersionID = &sourceID
 			created.Mode, created.WeeklyCapacityMinutes, created.StartDate, created.EndDate = value.Mode, value.WeeklyCapacityMinutes, value.StartDate, value.EndDate
 		default:
 			return ErrValidation
 		}
-		if err := tx.Create(&created).Error; err != nil {
-			// Two clones racing both compute version_no = base + 1; the loser hits
-			// uk_plan_versions_number, which is a conflict and not a server error.
-			if isDuplicate(err) {
-				return ErrConflict
-			}
+		if err := repo.CreatePlanVersion(ctx, &created); err != nil {
 			return err
 		}
 		if source == nil {
 			return nil
 		}
-		var milestones []model.Milestone
-		if err := tx.Where("plan_version_id = ? AND user_id = ?", source.ID, userID).Order("position").Find(&milestones).Error; err != nil {
+		milestones, err := repo.MilestonesByVersion(ctx, userID, source.ID)
+		if err != nil {
 			return err
 		}
 		milestoneMap := map[string]string{}
 		for _, item := range milestones {
 			copy := model.Milestone{ID: uuid.NewString(), UserID: userID, PlanVersionID: created.ID, Title: item.Title, Outcome: item.Outcome, Position: item.Position}
-			if err := tx.Create(&copy).Error; err != nil {
+			if err := repo.CreateMilestone(ctx, &copy); err != nil {
 				return err
 			}
 			milestoneMap[item.ID] = copy.ID
 		}
-		var tasks []model.Task
-		if err := tx.Where("plan_version_id = ? AND user_id = ?", source.ID, userID).Order("position").Find(&tasks).Error; err != nil {
+		tasks, err := repo.TasksByVersion(ctx, userID, source.ID)
+		if err != nil {
 			return err
 		}
 		for _, item := range tasks {
@@ -1026,7 +1019,7 @@ func (s *Service) CreatePlanVersion(ctx context.Context, userID, planID string, 
 			}
 			sourceID := item.ID
 			copy := model.Task{ID: uuid.NewString(), UserID: userID, PlanVersionID: created.ID, MilestoneID: milestoneID, CopiedFromTaskID: &sourceID, Title: item.Title, Description: item.Description, EstimateMinutes: item.EstimateMinutes, ScheduledDate: item.ScheduledDate, Position: item.Position, Status: item.Status, Version: 1, Source: item.Source}
-			if err := tx.Create(&copy).Error; err != nil {
+			if err := repo.CreateTask(ctx, &copy); err != nil {
 				return err
 			}
 		}
@@ -1042,8 +1035,8 @@ func (s *Service) CreatePlanVersion(ctx context.Context, userID, planID string, 
 
 func (s *Service) UpdatePlanVersion(ctx context.Context, userID, versionID string, input UpdatePlanVersionInput) (*VersionView, error) {
 	var updated model.PlanVersion
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		version, plan, err := s.versionAndPlan(ctx, tx, userID, versionID, true)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		version, plan, err := s.versionAndPlan(ctx, repo, userID, versionID, true)
 		if err != nil {
 			return err
 		}
@@ -1056,8 +1049,8 @@ func (s *Service) UpdatePlanVersion(ctx context.Context, userID, versionID strin
 				return ErrValidation
 			}
 			if *input.Mode == model.PlanModeSequence {
-				var scheduled int64
-				if err := tx.Model(&model.Task{}).Where("user_id = ? AND plan_version_id = ? AND scheduled_date IS NOT NULL", userID, versionID).Count(&scheduled).Error; err != nil {
+				scheduled, err := repo.CountScheduledTasks(ctx, userID, versionID)
+				if err != nil {
 					return err
 				}
 				if scheduled > 0 {
@@ -1108,11 +1101,15 @@ func (s *Service) UpdatePlanVersion(ctx context.Context, userID, versionID strin
 			return ErrValidation
 		}
 		if len(changes) > 0 {
-			if err := tx.Model(&model.PlanVersion{}).Where("id = ? AND user_id = ?", versionID, userID).Updates(changes).Error; err != nil {
+			if err := repo.UpdatePlanVersion(ctx, userID, versionID, changes); err != nil {
 				return err
 			}
 		}
-		return tx.Where("id = ? AND user_id = ?", versionID, userID).First(&updated).Error
+		value, err := repo.PlanVersion(ctx, userID, versionID, false)
+		if err == nil {
+			updated = *value
+		}
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -1124,18 +1121,22 @@ func (s *Service) UpdatePlanVersion(ctx context.Context, userID, versionID strin
 
 func (s *Service) CancelPlanVersion(ctx context.Context, userID, versionID string) (*VersionView, error) {
 	var updated model.PlanVersion
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		version, plan, err := s.versionAndPlan(ctx, tx, userID, versionID, true)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		version, plan, err := s.versionAndPlan(ctx, repo, userID, versionID, true)
 		if err != nil {
 			return err
 		}
 		if version.Status != model.PlanVersionDraft || plan.Status != model.GoalStatusActive {
 			return ErrInvalidState
 		}
-		if err := tx.Model(&model.PlanVersion{}).Where("id = ? AND user_id = ?", versionID, userID).Update("status", model.PlanVersionCanceled).Error; err != nil {
+		if err := repo.UpdatePlanVersion(ctx, userID, versionID, map[string]any{"status": model.PlanVersionCanceled}); err != nil {
 			return err
 		}
-		return tx.Where("id = ? AND user_id = ?", versionID, userID).First(&updated).Error
+		value, err := repo.PlanVersion(ctx, userID, versionID, false)
+		if err == nil {
+			updated = *value
+		}
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -1147,17 +1148,17 @@ func (s *Service) CancelPlanVersion(ctx context.Context, userID, versionID strin
 
 func (s *Service) ActivatePlanVersion(ctx context.Context, userID, versionID string) (*PlanDetail, error) {
 	var planID string
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var version model.PlanVersion
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", versionID, userID).First(&version).Error; err != nil {
-			return mapNotFound(err)
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+		version, err := repo.PlanVersion(ctx, userID, versionID, true)
+		if err != nil {
+			return err
 		}
 		if version.Status == model.PlanVersionCanceled {
 			return ErrInvalidState
 		}
-		var plan model.Plan
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", version.PlanID, userID).First(&plan).Error; err != nil {
-			return mapNotFound(err)
+		plan, err := repo.Plan(ctx, userID, version.PlanID, true)
+		if err != nil {
+			return err
 		}
 		planID = plan.ID
 		if plan.Status != model.GoalStatusActive {
@@ -1173,27 +1174,28 @@ func (s *Service) ActivatePlanVersion(ctx context.Context, userID, versionID str
 			return ErrInvalidState
 		}
 		if plan.ActiveVersionID != nil {
-			var active model.PlanVersion
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND user_id = ?", *plan.ActiveVersionID, userID).First(&active).Error; err != nil {
-				return mapNotFound(err)
+			active, err := repo.PlanVersion(ctx, userID, *plan.ActiveVersionID, true)
+			if err != nil {
+				return err
 			}
-			var running int64
-			if err := tx.Table("study_sessions s").Joins("JOIN tasks t ON t.id = s.task_id").Where("s.user_id = ? AND s.status = ? AND t.plan_version_id = ?", userID, model.SessionStatusRunning, active.ID).Count(&running).Error; err != nil {
+			running, err := repo.CountRunningSessionsForVersion(ctx, userID, active.ID)
+			if err != nil {
 				return err
 			}
 			if running > 0 {
 				return ErrConflict
 			}
 			now := s.now().UTC()
-			if err := tx.Model(&model.PlanVersion{}).Where("id = ? AND user_id = ?", active.ID, userID).Updates(map[string]any{"status": model.PlanVersionSuperseded, "superseded_at": now}).Error; err != nil {
+			if err := repo.UpdatePlanVersion(ctx, userID, active.ID, map[string]any{"status": model.PlanVersionSuperseded, "superseded_at": now}); err != nil {
 				return err
 			}
 		}
 		now := s.now().UTC()
-		if err := tx.Model(&model.PlanVersion{}).Where("id = ? AND user_id = ?", version.ID, userID).Updates(map[string]any{"status": model.PlanVersionActive, "activated_at": now, "superseded_at": nil}).Error; err != nil {
+		if err := repo.UpdatePlanVersion(ctx, userID, version.ID, map[string]any{"status": model.PlanVersionActive, "activated_at": now, "superseded_at": nil}); err != nil {
 			return err
 		}
-		return tx.Model(&model.Plan{}).Where("id = ? AND user_id = ?", plan.ID, userID).Update("active_version_id", version.ID).Error
+		_, err = repo.UpdatePlan(ctx, userID, plan.ID, nil, map[string]any{"active_version_id": version.ID}, false)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -1204,12 +1206,12 @@ func (s *Service) ActivatePlanVersion(ctx context.Context, userID, versionID str
 
 func (s *Service) versionView(ctx context.Context, userID string, version model.PlanVersion) (VersionView, error) {
 	view := VersionView{ID: version.ID, VersionNo: version.VersionNo, Status: version.Status, Mode: version.Mode, SourceVersionID: version.SourceVersionID, WeeklyCapacityMinutes: version.WeeklyCapacityMinutes, StartDate: formatDatePtr(version.StartDate), EndDate: formatDatePtr(version.EndDate), StructureRevision: version.StructureRevision, ActivatedAt: version.ActivatedAt, SupersededAt: version.SupersededAt, Milestones: []MilestoneView{}, UnassignedTasks: []TaskView{}}
-	var milestones []model.Milestone
-	if err := s.db.WithContext(ctx).Where("plan_version_id = ? AND user_id = ?", version.ID, userID).Order("position, id").Find(&milestones).Error; err != nil {
+	milestones, err := s.repo.MilestonesByVersion(ctx, userID, version.ID)
+	if err != nil {
 		return view, err
 	}
-	var tasks []model.Task
-	if err := s.db.WithContext(ctx).Where("plan_version_id = ? AND user_id = ?", version.ID, userID).Order("position, id").Find(&tasks).Error; err != nil {
+	tasks, err := s.repo.TasksByVersion(ctx, userID, version.ID)
+	if err != nil {
 		return view, err
 	}
 	byMilestone := map[string][]TaskView{}
@@ -1233,21 +1235,9 @@ func (s *Service) versionView(ctx context.Context, userID string, version model.
 	return view, nil
 }
 
-func (s *Service) getGoal(ctx context.Context, db *gorm.DB, userID, goalID string, lock bool) (*model.Goal, error) {
-	query := db.WithContext(ctx)
-	if lock {
-		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
-	}
-	var goal model.Goal
-	if err := query.Where("id = ? AND user_id = ?", goalID, userID).First(&goal).Error; err != nil {
-		return nil, mapNotFound(err)
-	}
-	return &goal, nil
-}
-
-func (s *Service) ensureNoGoalCycle(ctx context.Context, tx *gorm.DB, userID, goalID, newParentID string) error {
-	var goals []model.Goal
-	if err := tx.WithContext(ctx).Where("user_id = ?", userID).Find(&goals).Error; err != nil {
+func (s *Service) ensureNoGoalCycle(ctx context.Context, repo Repository, userID, goalID, newParentID string) error {
+	goals, err := repo.Goals(ctx, userID)
+	if err != nil {
 		return err
 	}
 	parents := map[string]*string{}
@@ -1276,13 +1266,13 @@ func (s *Service) ensureNoGoalCycle(ctx context.Context, tx *gorm.DB, userID, go
 	return nil
 }
 
-func (s *Service) goalCompletionSummary(ctx context.Context, db *gorm.DB, userID, goalID string) (GoalCompletionSummary, error) {
-	var goals []model.Goal
-	if err := db.WithContext(ctx).Where("user_id = ? AND parent_goal_id = ?", userID, goalID).Find(&goals).Error; err != nil {
+func (s *Service) goalCompletionSummary(ctx context.Context, repo Repository, userID, goalID string) (GoalCompletionSummary, error) {
+	goals, err := repo.ChildGoals(ctx, userID, goalID)
+	if err != nil {
 		return GoalCompletionSummary{}, err
 	}
-	var plans []model.Plan
-	if err := db.WithContext(ctx).Where("user_id = ? AND goal_id = ?", userID, goalID).Find(&plans).Error; err != nil {
+	plans, err := repo.PlansByGoal(ctx, userID, goalID)
+	if err != nil {
 		return GoalCompletionSummary{}, err
 	}
 	summary := GoalCompletionSummary{}
@@ -1313,23 +1303,24 @@ func (s *Service) goalCompletionSummary(ctx context.Context, db *gorm.DB, userID
 	return summary, nil
 }
 
-func (s *Service) planCompletionSummary(ctx context.Context, db *gorm.DB, userID string, plan model.Plan) (PlanCompletionSummary, error) {
+func (s *Service) planCompletionSummary(ctx context.Context, repo Repository, userID string, plan model.Plan) (PlanCompletionSummary, error) {
 	summary := PlanCompletionSummary{HasActiveVersion: plan.ActiveVersionID != nil}
 	if plan.ActiveVersionID == nil {
 		return summary, nil
 	}
-	var total, done int64
-	if err := db.WithContext(ctx).Model(&model.Task{}).Where("user_id = ? AND plan_version_id = ? AND status <> ?", userID, *plan.ActiveVersionID, model.TaskStatusCanceled).Count(&total).Error; err != nil {
+	total, err := repo.CountTasks(ctx, userID, *plan.ActiveVersionID, nil, []string{model.TaskStatusCanceled})
+	if err != nil {
 		return summary, err
 	}
-	if err := db.WithContext(ctx).Model(&model.Task{}).Where("user_id = ? AND plan_version_id = ? AND status = ?", userID, *plan.ActiveVersionID, model.TaskStatusDone).Count(&done).Error; err != nil {
+	done, err := repo.CountTasks(ctx, userID, *plan.ActiveVersionID, []string{model.TaskStatusDone}, nil)
+	if err != nil {
 		return summary, err
 	}
 	summary.TotalTasks, summary.DoneTasks, summary.OpenTasks = int(total), int(done), int(total-done)
 	return summary, nil
 }
 
-func (s *Service) inactiveGoalAncestors(ctx context.Context, db *gorm.DB, userID string, startID *string) ([]string, error) {
+func (s *Service) inactiveGoalAncestors(ctx context.Context, repo Repository, userID string, startID *string) ([]string, error) {
 	result := []string{}
 	current := startID
 	seen := map[string]bool{}
@@ -1338,7 +1329,7 @@ func (s *Service) inactiveGoalAncestors(ctx context.Context, db *gorm.DB, userID
 			return nil, ErrValidation
 		}
 		seen[*current] = true
-		goal, err := s.getGoal(ctx, db, userID, *current, false)
+		goal, err := repo.Goal(ctx, userID, *current, false)
 		if err != nil {
 			return nil, err
 		}
@@ -1410,18 +1401,6 @@ func formatDatePtr(value *time.Time) *string {
 	}
 	formatted := value.Format("2006-01-02")
 	return &formatted
-}
-
-func mapNotFound(err error) error {
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return ErrNotFound
-	}
-	return err
-}
-
-func isDuplicate(err error) bool {
-	var value *mysql.MySQLError
-	return errors.As(err, &value) && value.Number == 1062
 }
 
 func taskView(task model.Task, planID, planTitle, planMode string, today time.Time) TaskView {
