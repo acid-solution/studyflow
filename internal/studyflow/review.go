@@ -149,7 +149,7 @@ func (s *Service) WeeklyReview(ctx context.Context, userID, requestedStart strin
 		return nil, err
 	}
 	if known {
-		s.cache.Write(ctx, key, review)
+		s.cache.Write(ctx, userID, generation, key, review)
 	}
 	return review, nil
 }

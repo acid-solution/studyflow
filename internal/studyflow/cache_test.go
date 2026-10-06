@@ -37,12 +37,16 @@ func (f *fakeCache) Read(_ context.Context, key string, target any) bool {
 	return json.Unmarshal(raw, target) == nil
 }
 
-func (f *fakeCache) Write(_ context.Context, key string, value any) {
+func (f *fakeCache) Write(_ context.Context, userID string, generation int64, key string, value any) {
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return
 	}
 	f.mu.Lock()
+	if generation != f.gens[userID] {
+		f.mu.Unlock()
+		return
+	}
 	f.items[key] = raw
 	f.writes++
 	f.mu.Unlock()

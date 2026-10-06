@@ -10,15 +10,17 @@ import (
 //
 // Invalidation works by generation, not by deletion: every key embeds the
 // caller's current generation, so one INCR after a write makes every cached read
-// for that user unreachable at once. That matters because a goal tree is touched
-// by around eighteen write paths — deleting individual keys from each of them is
-// eighteen chances to miss one.
+// for that user unreachable at once. Goal trees, task lists and weekly reviews
+// are all affected by many independent write paths.
 //
 // Implementations must be fail-open: a backend problem has to look like a miss,
 // never like an error.
 type Cache interface {
 	Read(ctx context.Context, key string, target any) bool
-	Write(ctx context.Context, key string, value any)
+	// Write stores a value only while generation is still current. Passing the
+	// generation prevents a read that raced with a write from repopulating the
+	// active cache namespace with stale data.
+	Write(ctx context.Context, userID string, generation int64, key string, value any)
 	// Generation reports the caller's current generation and whether it could be
 	// read at all. A caller that gets false has to skip the cache entirely rather
 	// than fall back to zero, because zero is a real generation that entries were
@@ -31,10 +33,10 @@ type Cache interface {
 // for a nil cache.
 type noopCache struct{}
 
-func (noopCache) Read(context.Context, string, any) bool    { return false }
-func (noopCache) Write(context.Context, string, any)        {}
-func (noopCache) Generation(context.Context, string) (int64, bool) { return 0, false }
-func (noopCache) Bump(context.Context, string)              {}
+func (noopCache) Read(context.Context, string, any) bool            { return false }
+func (noopCache) Write(context.Context, string, int64, string, any) {}
+func (noopCache) Generation(context.Context, string) (int64, bool)  { return 0, false }
+func (noopCache) Bump(context.Context, string)                      {}
 
 const cacheKeyPrefix = "sf:v1"
 

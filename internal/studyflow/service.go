@@ -486,7 +486,7 @@ func (s *Service) GoalTree(ctx context.Context, userID string) ([]*GoalNode, err
 		return nil, err
 	}
 	if known {
-		s.cache.Write(ctx, key, roots)
+		s.cache.Write(ctx, userID, generation, key, roots)
 	}
 	return roots, nil
 }

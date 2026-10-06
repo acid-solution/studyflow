@@ -36,6 +36,8 @@ func newCache(cfg config.Config, logger *slog.Logger) app.Cache {
 	defer cancel()
 	if err := store.Ping(ctx); err != nil {
 		logger.Warn("cache unreachable at startup, serving from mysql until it comes back", "addr", cfg.RedisAddr, "error", err)
+	} else if !store.Ready() {
+		logger.Info("cache reachable, waiting for stale entries to expire", "addr", cfg.RedisAddr, "safety_window", (2 * cfg.CacheTTL).String())
 	} else {
 		logger.Info("cache enabled", "addr", cfg.RedisAddr, "ttl", cfg.CacheTTL.String())
 	}

@@ -654,7 +654,7 @@ func (s *Service) ListTasks(ctx context.Context, userID string, filter TaskFilte
 		return nil, err
 	}
 	if cacheable {
-		s.cache.Write(ctx, key, items)
+		s.cache.Write(ctx, userID, generation, key, items)
 	}
 	return items, nil
 }
