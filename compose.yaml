@@ -52,6 +52,7 @@ services:
       AUTH_JWKS_URL: ${AUTH_JWKS_URL:-http://host.docker.internal:18082/.well-known/jwks.json}
       AUTH_ISSUER: ${AUTH_ISSUER:-shared-auth}
       AUTH_AUDIENCE: studyflow
+      STUDYFLOW_MCP_RESOURCE: ${STUDYFLOW_MCP_RESOURCE:-}
       FRONTEND_URL: ${FRONTEND_URL:-http://127.0.0.1:8081}
       CACHE_ENABLED: ${CACHE_ENABLED:-true}
       REDIS_ADDR: redis:6379

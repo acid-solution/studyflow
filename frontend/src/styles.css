@@ -70,6 +70,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .summary-strip > div:last-child { border-right: 0; }
 .summary-strip strong, .summary-strip span { display: block; }
 .summary-strip strong { font-size: 19px; font-weight: 550; }
+.plan-summary-strip { grid-template-columns: minmax(0, 2fr) minmax(0, 1.4fr) minmax(100px, .6fr) minmax(100px, .7fr); align-items: stretch; }
+.plan-summary-strip > div { min-width: 0; }
+.plan-summary-strip strong { margin-top: 8px; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+@media (max-width: 800px) { .summary-strip.plan-summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .summary-strip span { margin-top: 5px; color: var(--muted); font-size: 10px; }
 .summary-copy { display: flex; align-items: center; gap: 9px; color: var(--primary); background: var(--primary-soft); }
 .summary-copy span { margin: 0; color: #49618c; font-size: 11px; }
