@@ -30,11 +30,13 @@ type Config struct {
 
 	// Caching is off unless CACHE_ENABLED is set. The service falls back to MySQL
 	// whenever Redis is unreachable, so this only decides whether it is tried.
-	CacheEnabled  bool
-	RedisAddr     string
-	RedisPassword string
-	RedisDB       int
-	CacheTTL      time.Duration
+	CacheEnabled             bool
+	RedisAddr                string
+	RedisPassword            string
+	RedisDB                  int
+	CacheTTL                 time.Duration
+	NotificationPollInterval time.Duration
+	NotificationRetention    time.Duration
 }
 
 func Load() (Config, error) {
@@ -52,13 +54,24 @@ func Load() (Config, error) {
 
 		AppHost: valueOrDefault("APP_HOST", "127.0.0.1"),
 
-		CacheEnabled:  strings.EqualFold(valueOrDefault("CACHE_ENABLED", "false"), "true"),
-		RedisAddr:     valueOrDefault("REDIS_ADDR", "127.0.0.1:6379"),
-		RedisPassword: strings.TrimSpace(os.Getenv("REDIS_PASSWORD")),
-		CacheTTL:      30 * time.Second,
+		CacheEnabled:             strings.EqualFold(valueOrDefault("CACHE_ENABLED", "false"), "true"),
+		RedisAddr:                valueOrDefault("REDIS_ADDR", "127.0.0.1:6379"),
+		RedisPassword:            strings.TrimSpace(os.Getenv("REDIS_PASSWORD")),
+		CacheTTL:                 30 * time.Second,
+		NotificationPollInterval: time.Second,
+		NotificationRetention:    7 * 24 * time.Hour,
 	}
 	if cfg.MySQLDSN == "" {
 		return Config{}, errors.New("MYSQL_DSN is required")
+	}
+	for key, target := range map[string]*time.Duration{"NOTIFICATION_POLL_INTERVAL": &cfg.NotificationPollInterval, "NOTIFICATION_RETENTION": &cfg.NotificationRetention} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			duration, err := time.ParseDuration(value)
+			if err != nil || duration <= 0 {
+				return Config{}, errors.New(key + " must be a positive duration")
+			}
+			*target = duration
+		}
 	}
 	if value := strings.TrimSpace(os.Getenv("JWKS_CACHE_TTL")); value != "" {
 		duration, err := time.ParseDuration(value)

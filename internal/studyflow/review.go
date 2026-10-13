@@ -103,7 +103,9 @@ func (s *Service) UpdatePreferences(ctx context.Context, userID string, input Up
 	if len(changes) == 0 {
 		return current, nil
 	}
-	if err := s.repo.UpdatePreference(ctx, userID, changes); err != nil {
+	if err := s.withChange(ctx, userID, "preferences.updated", func(repo Repository) error {
+		return repo.UpdatePreference(ctx, userID, changes)
+	}); err != nil {
 		return nil, err
 	}
 	// Timezone and week start decide how the cached task list marks overdue items

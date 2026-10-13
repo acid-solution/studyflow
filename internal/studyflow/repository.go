@@ -19,6 +19,10 @@ import (
 // service keep business decisions and transaction boundaries together without
 // depending on GORM.
 type Repository interface {
+	AppendNotification(context.Context, string, string, []NotificationResource, []string, time.Time) error
+	NotificationHead(context.Context, string) (model.NotificationStream, error)
+	NotificationsAfter(context.Context, string, uint64, uint64, int) ([]Notification, error)
+	PruneNotifications(context.Context, time.Time, int) error
 	LockLearningRoute(context.Context, string, string) (*model.LearningRouteBinding, error)
 	SaveLearningRoute(context.Context, *model.LearningRouteBinding) error
 	CreateLearningRouteImport(context.Context, *model.LearningRouteImport) error

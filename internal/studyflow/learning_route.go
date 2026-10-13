@@ -127,7 +127,7 @@ func (s *Service) ImportLearningRoute(ctx context.Context, user, key string, inp
 		return nil, err
 	}
 	var result LearningRouteReceipt
-	err = s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err = s.withChange(ctx, user, "learning_route.imported", func(repo Repository) error {
 		binding, err := repo.LockLearningRoute(ctx, user, input.SourceRouteID)
 		if err != nil {
 			return err

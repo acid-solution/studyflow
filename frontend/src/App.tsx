@@ -1,10 +1,13 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useState } from 'react'
+import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlertCircle, BarChart3, BookOpen, CalendarDays, Check, ChevronDown, ChevronRight,
-  Circle, Clock3, Flag, Home, ListChecks, LogOut, Plus, RefreshCcw, Route, Settings,
-  ShieldCheck, Target, Timer, X,
+  Circle, Flag, Home, ListChecks, LogOut, Plus, RefreshCcw, Route, Settings,
+  ShieldCheck, Target, Timer,
 } from 'lucide-react'
 import { Account, APIError, api, login, logout, refreshAccess, register, requestVerification } from './api'
+import { useLoad } from './data'
+import { SyncProvider, SyncStatus, clearSyncCursor } from './sync'
+import TaskDrawer from './TaskDrawer'
 import type { Dashboard, GoalNode, ImportDraft, Milestone, PlanDetail, PlanImportResult, PlanImportView, PlanMode, PlanSummary, PlanVersion, Preferences, Session, Task, TaskSource, WeeklyReview } from './types'
 
 type Page = 'today' | 'goals' | 'plans' | 'plan-detail' | 'tasks' | 'reviews' | 'imports' | 'settings'
@@ -21,19 +24,6 @@ const nav: Array<{ id: Page; label: string; icon: typeof Home }> = [
 
 const hours = (seconds: number) => `${(seconds / 3600).toFixed(seconds % 3600 === 0 ? 0 : 1)}h`
 const minutes = (value: number) => `${Math.floor(value / 60)}h ${value % 60}m`
-
-function useLoad<T>(loader: () => Promise<T>, deps: unknown[]) {
-  const [data, setData] = useState<T | null>(null)
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(true)
-  const reload = useCallback(async () => {
-    setLoading(true); setError('')
-    try { setData(await loader()) } catch (reason) { setError(messageOf(reason)) } finally { setLoading(false) }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps)
-  useEffect(() => { void reload() }, [reload])
-  return { data, error, loading, reload }
-}
 
 function messageOf(reason: unknown) {
   if (reason instanceof APIError) return reason.message
@@ -92,7 +82,7 @@ function TaskRow({ task, onOpen, onComplete }: { task: Task; onOpen: (task: Task
 }
 
 function TodayPage({ token, onOpen }: { token: string; onOpen: (task: Task, reload: () => void) => void }) {
-  const { data, error, reload } = useLoad(() => api<Dashboard>(token, '/dashboard/today'), [token])
+  const { data, error, reload } = useLoad(() => api<Dashboard>(token, '/dashboard/today'), [token], ['dashboard'])
   const setDone = async (task: Task) => { await api(token, `/tasks/${task.id}/${task.status === 'done' ? 'reopen' : 'complete'}`, { method: 'POST' }); await reload() }
   if (!data) return <PageFrame eyebrow="今日工作台" title="先处理最需要推进的内容" description="日期任务安排到天，课时计划按顺序继续。"><LoadingBlock error={error} /></PageFrame>
   return <PageFrame eyebrow={data.date} title="先处理最需要推进的内容" description="多个计划可以同步进行，计时记录会进入本周复盘。">
@@ -133,7 +123,7 @@ function chooseParentEffect(label: string) {
 }
 
 function GoalsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: string) => void }) {
-  const { data, error, reload } = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token])
+  const { data, error, reload } = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token], ['goals'])
   const [editing, setEditing] = useState<GoalNode | null>(null)
   const [parentID, setParentID] = useState('')
   const [title, setTitle] = useState('')
@@ -141,9 +131,13 @@ function GoalsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: stri
   const [showForm, setShowForm] = useState(false)
   const [notice, setNotice] = useState('')
   const all = flattenGoals(data ?? [])
+  const currentGoal = editing ? all.find((item) => item.goal.id === editing.id)?.goal : undefined
+  const staleGoal = Boolean(editing && currentGoal && currentGoal.version !== editing.version)
+  const reloadGoal = () => { if (!currentGoal || !window.confirm('重新加载会放弃尚未保存的修改，继续吗？')) return; setEditing(currentGoal); setTitle(currentGoal.title); setCriteria(currentGoal.success_criteria); setParentID(currentGoal.parent_goal_id ?? '') }
   const reset = () => { setEditing(null); setParentID(''); setTitle(''); setCriteria(''); setShowForm(false) }
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    if (staleGoal) { setNotice('数据已在其他客户端更新，请先核对最新数据。'); return }
     if (editing) await api(token, `/goals/${editing.id}`, { method: 'PATCH', body: JSON.stringify({ version: editing.version, title, success_criteria: criteria, parent_goal_id: parentID || undefined, clear_parent: !parentID }) })
     else await api(token, '/goals', { method: 'POST', body: JSON.stringify({ title, success_criteria: criteria, parent_goal_id: parentID || undefined }) })
     reset(); await reload()
@@ -167,6 +161,7 @@ function GoalsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: stri
   const reopen = (goal: GoalNode) => run(() => api(token, `/goals/${goal.id}/reopen`, { method: 'POST' }))
   const togglePolicy = (goal: GoalNode) => run(() => api(token, `/goals/${goal.id}/completion-policy`, { method: 'PATCH', body: JSON.stringify({ parent_effect: goal.excluded_from_parent_completion ? 'block' : 'exclude' }) }))
   return <PageFrame eyebrow="目标树" title="把长期目标逐层拆开" description="目标可以继续拆成分目标，计划可挂在任意一级。" action={<button className="button button-primary" onClick={() => { reset(); setShowForm(true) }}><Plus size={16} />新建目标</button>}>
+    {staleGoal && <div className="sync-edit-warning" role="alert">数据已在其他客户端更新，尚未保存的输入已保留。<button className="button" onClick={reloadGoal}>重新加载最新数据</button></div>}
     {showForm && <form className="inline-editor" onSubmit={submit}><div><strong>{editing ? '编辑目标' : '新建目标'}</strong><span>父目标为空时创建根目标</span></div><input required placeholder="目标名称" value={title} onChange={(event) => setTitle(event.target.value)} /><input placeholder="完成标准" value={criteria} onChange={(event) => setCriteria(event.target.value)} /><select value={parentID} onChange={(event) => setParentID(event.target.value)}><option value="">根目标</option>{all.filter((item) => item.goal.id !== editing?.id).map(({ goal, depth }) => <option key={goal.id} value={goal.id}>{'　'.repeat(depth)}{goal.title}</option>)}</select><button className="button button-primary">保存</button><button className="button" type="button" onClick={reset}>取消</button></form>}
     {notice && <p className="drawer-error">{notice}</p>}
     {!data ? <LoadingBlock error={error} /> : <section className="goal-tree">{data.length ? data.map((goal) => <GoalBranch key={goal.id} goal={goal} depth={0} onEdit={beginEdit} onAdd={addChild} onComplete={complete} onAbandon={abandon} onReopen={reopen} onTogglePolicy={togglePolicy} onOpenPlan={onOpenPlan} />) : <div className="empty-plans"><Flag size={26} /><strong>还没有目标</strong><span>先创建一个真正想达成的长期目标。</span></div>}</section>}
@@ -181,8 +176,8 @@ function GoalBranch({ goal, depth, onEdit, onAdd, onComplete, onAbandon, onReope
 }
 
 function PlansPage({ token, onOpen }: { token: string; onOpen: (id: string) => void }) {
-  const plans = useLoad(() => api<PlanSummary[]>(token, '/plans'), [token])
-  const goals = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token])
+  const plans = useLoad(() => api<PlanSummary[]>(token, '/plans'), [token], ['plans'])
+  const goals = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token], ['goals'])
   const [showForm, setShowForm] = useState(false)
   const [goalID, setGoalID] = useState('')
   const [title, setTitle] = useState('')
@@ -201,14 +196,14 @@ function PlansPage({ token, onOpen }: { token: string; onOpen: (id: string) => v
 }
 
 function PlanDetailPage({ token, planID, onOpenTask }: { token: string; planID: string; onOpenTask: (task: Task, reload: () => void) => void }) {
-  const { data, error, reload } = useLoad(() => api<PlanDetail>(token, `/plans/${planID}`), [token, planID])
+  const { data, error, reload } = useLoad(() => api<PlanDetail>(token, `/plans/${planID}`), [token, planID], ['plan-detail'])
   const [selectedID, setSelectedID] = useState(() => new URLSearchParams(window.location.search).get('version_id') ?? '')
   const [milestoneTitle, setMilestoneTitle] = useState('')
   const [taskTitle, setTaskTitle] = useState('')
   const [taskMilestone, setTaskMilestone] = useState('')
   const [taskDate, setTaskDate] = useState('')
   const [notice, setNotice] = useState('')
-  useEffect(() => { if (data) { const requested = new URLSearchParams(window.location.search).get('version_id'); const preferred = data.versions.find((version) => version.id === requested) ?? data.versions.find((version) => version.status === 'draft') ?? data.versions.find((version) => version.status === 'active') ?? data.versions[0]; setSelectedID(preferred?.id ?? '') } }, [data])
+  useEffect(() => { if (data) { const requested = new URLSearchParams(window.location.search).get('version_id'); const preferred = data.versions.find((version) => version.id === requested) ?? data.versions.find((version) => version.status === 'draft') ?? data.versions.find((version) => version.status === 'active') ?? data.versions[0]; setSelectedID((current) => data.versions.some((version) => version.id === current) ? current : preferred?.id ?? '') } }, [data])
   if (!data) return <PageFrame eyebrow="计划详情" title="读取计划" description="正在加载版本和任务树。"><LoadingBlock error={error} /></PageFrame>
   const selected = data.versions.find((version) => version.id === selectedID) ?? data.versions[0]
   const run = async (job: () => Promise<unknown>) => { setNotice(''); try { await job(); await reload() } catch (reason) { setNotice(messageOf(reason)) } }
@@ -261,7 +256,7 @@ function MilestoneCard({ milestone, onOpen }: { milestone: Milestone; onOpen: (t
 function StageTask({ task, onOpen }: { task: Task; onOpen: (task: Task) => void }) { return <button className={task.status === 'done' ? 'stage-task is-done' : 'stage-task'} onClick={() => onOpen(task)}><span>{task.status === 'done' ? <Check size={13} /> : <Circle size={14} />}</span><strong>{task.title}</strong><em>{task.status === 'done' ? '已完成' : task.scheduled_date ?? '待执行'}</em></button> }
 
 function TasksPage({ token, onOpen }: { token: string; onOpen: (task: Task, reload: () => void) => void }) {
-  const { data, error, reload } = useLoad(() => api<Task[]>(token, '/tasks'), [token])
+  const { data, error, reload } = useLoad(() => api<Task[]>(token, '/tasks'), [token], ['tasks'])
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('')
   const visible = (data ?? []).filter((task) => task.title.toLowerCase().includes(query.toLowerCase()) && (!status || task.status === status))
@@ -269,7 +264,7 @@ function TasksPage({ token, onOpen }: { token: string; onOpen: (task: Task, relo
 }
 
 function ReviewPage({ token }: { token: string }) {
-  const { data, error } = useLoad(() => api<WeeklyReview>(token, '/reviews/weekly'), [token])
+  const { data, error } = useLoad(() => api<WeeklyReview>(token, '/reviews/weekly'), [token], ['reviews'])
   if (!data) return <PageFrame eyebrow="学习复盘" title="本周执行情况" description="只展示真实任务和计时记录。"><LoadingBlock error={error} /></PageFrame>
   const max = Math.max(1, ...data.daily.map((item) => item.duration_seconds))
   return <PageFrame eyebrow={`${data.week_start} — ${data.week_end}`} title="本周学习复盘" description="比较计划投入与实际执行，不直接推断能力是否掌握。">
@@ -280,7 +275,7 @@ function ReviewPage({ token }: { token: string }) {
 }
 
 function SettingsPage({ token, account, onLogout }: { token: string; account: Account; onLogout: () => void }) {
-  const { data, error, reload } = useLoad(() => api<Preferences>(token, '/preferences'), [token])
+  const { data, error, reload } = useLoad(() => api<Preferences>(token, '/preferences'), [token], ['preferences'])
   const save = async (changes: Partial<Preferences>) => { await api(token, '/preferences', { method: 'PATCH', body: JSON.stringify(changes) }); await reload() }
   return <PageFrame eyebrow="个人空间" title="设置" description="管理计划偏好和当前账号。">
     <section className="settings-card account-card"><div className="settings-title"><span className="settings-icon"><ShieldCheck size={18} /></span><div><h2>共享认证账号</h2><p>StudyFlow 使用 shared-auth 提供的 UUID 身份。</p></div></div><div className="account-profile"><span className="large-avatar">{account.identities[0]?.value.slice(0, 1).toUpperCase() ?? 'U'}</span><div><strong>{account.identities[0]?.value ?? account.user.id}</strong><span>邮箱已验证 · {account.user.id}</span></div><button className="button" onClick={onLogout}><LogOut size={15} />退出登录</button></div></section>
@@ -323,8 +318,8 @@ function SourceBadge({ source }: { source: TaskSource }) {
 }
 
 function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: string) => void }) {
-  const goals = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token])
-  const history = useLoad(() => api<PlanImportView[]>(token, '/plan-imports'), [token])
+  const goals = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token], ['goals'])
+  const history = useLoad(() => api<PlanImportView[]>(token, '/plan-imports'), [token], ['imports'])
   const [goalID, setGoalID] = useState('')
   const [draft, setDraft] = useState('')
   const [key, setKey] = useState('')
@@ -435,27 +430,14 @@ function ImportsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: st
   </PageFrame>
 }
 
-function TaskDrawer({ token, task, running, onClose, onChanged }: { token: string; task: Task; running: Session | null; onClose: () => void; onChanged: () => void }) {
-  const history = useLoad(() => api<Session[]>(token, `/tasks/${task.id}/sessions`), [token, task.id])
-  const [title, setTitle] = useState(task.title)
-  const [description, setDescription] = useState(task.description)
-  const [date, setDate] = useState(task.scheduled_date ?? '')
-  const [estimate, setEstimate] = useState(task.estimate_minutes)
-  const [sessionNote, setSessionNote] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [notice, setNotice] = useState('')
-  const isRunning = running?.task_id === task.id
-  const isReadOnly = task.plan_status === 'achieved' || task.plan_status === 'abandoned' || task.version_status === 'superseded' || task.version_status === 'canceled'
-  const isDraft = task.version_status === 'draft' && !isReadOnly
-  const execute = async (job: () => Promise<unknown>) => { if (isReadOnly) { setNotice('历史版本和已结束计划只读；请先切换版本或恢复计划。'); return } setBusy(true); setNotice(''); try { await job(); onChanged() } catch (reason) { setNotice(messageOf(reason)) } finally { setBusy(false) } }
-  const save = () => execute(() => api(token, `/tasks/${task.id}`, { method: 'PATCH', body: JSON.stringify({ version: task.version, title, description, estimate_minutes: estimate, scheduled_date: date || undefined, clear_scheduled_date: !date }) }))
-  return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="task-drawer"><div className="drawer-head"><div><span>任务详情</span><strong>{task.plan_title || '学习计划'}</strong></div><button onClick={onClose}><X size={18} /></button></div><div className="drawer-body"><div className="drawer-status-row"><span className="plan-badge tone-blue">{task.plan_mode === 'sequence' ? '按课时' : '按日期'}</span><span className={task.is_overdue ? 'task-state is-overdue' : task.status === 'done' ? 'task-state is-done' : 'task-state'}>{isDraft ? '草稿任务' : task.is_overdue ? '已逾期' : task.status}</span></div><input className="drawer-title-input" value={title} onChange={(event) => setTitle(event.target.value)} /><div className="drawer-fields"><label><span>安排日期</span><input type="date" disabled={task.plan_mode === 'sequence'} value={date} onChange={(event) => setDate(event.target.value)} /></label><label><span>预计投入（分钟）</span><input type="number" min="0" value={estimate} onChange={(event) => setEstimate(Number(event.target.value))} /></label><label><span>版本</span><strong>{task.version}</strong></label><label><span>状态</span><strong>{isDraft ? '尚未激活' : task.status}</strong></label></div><section className="drawer-section"><h3>任务说明</h3><textarea value={description} onChange={(event) => setDescription(event.target.value)} /></section>{!isDraft && <section className="drawer-section"><h3>执行计时</h3>{isRunning ? <><div className="activity-row"><span className="activity-dot active-dot" /><div><strong>正在计时</strong><span>开始于 {new Date(running.started_at).toLocaleString('zh-CN')}</span></div></div><textarea className="session-note" value={sessionNote} onChange={(event) => setSessionNote(event.target.value)} placeholder="结束计时时保存一条简短记录（可选）" /></> : <p>开始后由服务器记录实际投入时间，同一时间只能计时一项任务。</p>}<div className="session-history">{history.error && <span className="drawer-error">{history.error}</span>}{history.data?.map((session) => <div className="session-record" key={session.id}><span className={session.status === 'finished' ? 'activity-dot' : 'activity-dot muted-dot'} /><div><strong>{session.status === 'finished' ? `学习 ${Math.max(1, Math.round(session.duration_seconds / 60))} 分钟` : session.status === 'running' ? '正在计时' : '已丢弃'}</strong><span>{new Date(session.started_at).toLocaleString('zh-CN')}{session.note ? ` · ${session.note}` : ''}</span></div></div>)}{history.data && !history.data.length && <span className="muted-copy">暂无历史计时记录</span>}</div></section>}{notice && <p className="drawer-error">{notice}</p>}</div><div className="drawer-actions"><button className="button" disabled={busy} onClick={save}>保存修改</button>{isDraft ? <button className="button button-danger" disabled={busy} onClick={() => execute(() => api(token, `/tasks/${task.id}`, { method: 'DELETE' }))}>删除草稿任务</button> : <>{task.status === 'done' ? <button className="button" disabled={busy} onClick={() => execute(() => api(token, `/tasks/${task.id}/reopen`, { method: 'POST' }))}>重新打开</button> : task.status !== 'canceled' && <button className="button" disabled={busy} onClick={() => execute(() => api(token, `/tasks/${task.id}/complete`, { method: 'POST' }))}>完成任务</button>}{task.status !== 'done' && task.status !== 'canceled' && !isRunning && <button className="button button-danger" disabled={busy} onClick={() => execute(() => api(token, `/tasks/${task.id}/cancel`, { method: 'POST' }))}>取消任务</button>}{isRunning ? <><button className="button" disabled={busy} onClick={() => execute(() => api(token, `/sessions/${running.id}/discard`, { method: 'POST' }))}>丢弃计时</button><button className="button button-primary" disabled={busy} onClick={() => execute(() => api(token, `/sessions/${running.id}/finish`, { method: 'POST', body: JSON.stringify({ note: sessionNote }) }))}><Clock3 size={15} />结束计时</button></> : <button className="button button-primary" disabled={busy || task.status === 'done' || task.status === 'canceled'} onClick={() => execute(() => api(token, `/tasks/${task.id}/sessions`, { method: 'POST' }))}><Timer size={15} />开始计时</button>}</>}</div></aside></div>
-}
-
 export default function App() {
+  const authGeneration = useRef(0)
+  const signingOut = useRef(false)
+  const accountID = useRef<string | null>(null)
   const [token, setToken] = useState('')
   const [account, setAccount] = useState<Account | null>(null)
   const [booting, setBooting] = useState(true)
+  const [loggingOut, setLoggingOut] = useState(false)
   const [page, setPage] = useState<Page>(() => new URLSearchParams(window.location.search).has('plan_id') ? 'plan-detail' : new URLSearchParams(window.location.search).has('goal_id') ? 'goals' : 'today')
   const [planID, setPlanID] = useState(() => new URLSearchParams(window.location.search).get('plan_id') ?? '')
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
@@ -463,15 +445,26 @@ export default function App() {
   const [running, setRunning] = useState<Session | null>(null)
   const [notice, setNotice] = useState('')
 
-  const accept = useCallback((issue: { access_token: string; account: Account }) => { setToken(issue.access_token); setAccount(issue.account) }, [])
+  const accept = useCallback((issue: { access_token: string; account: Account }) => {
+    if (accountID.current && accountID.current !== issue.account.user.id) { setSelectedTask(null); setRunning(null); setDrawerReload(null); setPlanID(''); setPage('today'); setNotice('') }
+    accountID.current = issue.account.user.id
+    setToken(issue.access_token); setAccount(issue.account)
+  }, [])
   useEffect(() => { refreshAccess().then(accept).catch(() => undefined).finally(() => setBooting(false)) }, [accept])
-  useEffect(() => { if (!token) return; const timer = window.setInterval(() => refreshAccess().then(accept).catch(() => { setToken(''); setAccount(null) }), 12 * 60 * 1000); return () => window.clearInterval(timer) }, [token, accept])
   const openTask = (task: Task, reload: () => void) => { setSelectedTask(task); setDrawerReload(() => reload); void api<Dashboard>(token, '/dashboard/today').then((value) => setRunning(value.running_session?.session ?? null)) }
   const changed = async () => { setSelectedTask(null); setRunning(null); drawerReload?.(); setNotice('操作已保存。') }
   const openPlan = (id: string) => { setPlanID(id); setPage('plan-detail') }
-  const signOut = async () => { await logout(); setToken(''); setAccount(null) }
+  const signOut = async () => { signingOut.current = true; authGeneration.current++; setLoggingOut(true); try { await logout() } catch (reason) { setNotice(messageOf(reason)) } finally { if (account) clearSyncCursor(account.user.id); setSelectedTask(null); setRunning(null); setDrawerReload(null); setPlanID(''); setPage('today'); setToken(''); setAccount(null); signingOut.current = false; setLoggingOut(false) } }
+  const renew = useCallback(async () => {
+    if (signingOut.current) return
+    const generation = authGeneration.current
+    try { const issue = await refreshAccess(); if (generation === authGeneration.current && !signingOut.current) accept(issue) }
+    catch (reason) { if (generation !== authGeneration.current || signingOut.current) return; if (reason instanceof APIError && reason.status === 401) { setToken(''); setAccount(null) } else { throw reason } }
+  }, [accept])
+  useEffect(() => { if (!token) return; const timer = window.setInterval(() => { void renew().catch(() => undefined) }, 12 * 60 * 1000); return () => window.clearInterval(timer) }, [token, renew])
   if (booting) return <main className="auth-shell"><div className="auth-card"><strong>正在恢复登录状态…</strong></div></main>
+  if (loggingOut) return <main className="auth-shell"><div className="auth-card"><strong>正在退出登录…</strong></div></main>
   if (!token || !account) return <AuthPage onAuthenticated={accept} />
   const title = page === 'today' ? ['今天', new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })] : page === 'goals' ? ['目标', '递归拆解长期目标'] : page === 'plans' ? ['学习计划', '多个计划同步推进'] : page === 'plan-detail' ? ['计划详情', '版本、阶段与任务'] : page === 'tasks' ? ['全部任务', '查询所有生效计划'] : page === 'reviews' ? ['学习复盘', '本周执行情况'] : page === 'imports' ? ['计划导入', '确认后写入'] : ['设置', '账号与计划偏好']
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><strong>StudyFlow</strong></div><nav className="navigation">{nav.map((item) => { const Icon = item.icon; return <button key={item.id} className={page === item.id || (page === 'plan-detail' && item.id === 'plans') ? 'nav-button is-current' : 'nav-button'} onClick={() => { setPage(item.id); setNotice('') }}><Icon size={18} /><span>{item.label}</span></button> })}</nav><div className="sidebar-footer"><span className="user-avatar">{account.identities[0]?.value.slice(0, 1).toUpperCase() ?? 'U'}</span><div><strong>{account.identities[0]?.value ?? '已登录用户'}</strong><span>个人空间</span></div><ChevronDown size={16} /></div></aside><main className="main-area"><header className="topbar"><div><span>{title[0]}</span><strong>{title[1]}</strong></div></header>{notice && <div className="notice"><span>{notice}</span><button onClick={() => setNotice('')}>×</button></div>}{page === 'today' && <TodayPage token={token} onOpen={openTask} />}{page === 'goals' && <GoalsPage token={token} onOpenPlan={openPlan} />}{page === 'plans' && <PlansPage token={token} onOpen={openPlan} />}{page === 'plan-detail' && planID && <PlanDetailPage token={token} planID={planID} onOpenTask={openTask} />}{page === 'tasks' && <TasksPage token={token} onOpen={openTask} />}{page === 'reviews' && <ReviewPage token={token} />}{page === 'settings' && <SettingsPage token={token} account={account} onLogout={signOut} />}{page === 'imports' && <ImportsPage token={token} onOpenPlan={openPlan} />}</main>{selectedTask && <TaskDrawer token={token} task={selectedTask} running={running} onClose={() => setSelectedTask(null)} onChanged={changed} />}</div>
+  return <SyncProvider key={account.user.id} token={token} userID={account.user.id} onUnauthorized={renew}><div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><strong>StudyFlow</strong></div><nav className="navigation">{nav.map((item) => { const Icon = item.icon; return <button key={item.id} className={page === item.id || (page === 'plan-detail' && item.id === 'plans') ? 'nav-button is-current' : 'nav-button'} onClick={() => { setPage(item.id); setNotice('') }}><Icon size={18} /><span>{item.label}</span></button> })}</nav><div className="sidebar-footer"><span className="user-avatar">{account.identities[0]?.value.slice(0, 1).toUpperCase() ?? 'U'}</span><div><strong>{account.identities[0]?.value ?? '已登录用户'}</strong><span>个人空间</span></div><ChevronDown size={16} /></div></aside><main className="main-area"><SyncStatus /><header className="topbar"><div><span>{title[0]}</span><strong>{title[1]}</strong></div></header>{notice && <div className="notice"><span>{notice}</span><button onClick={() => setNotice('')}>×</button></div>}{page === 'today' && <TodayPage token={token} onOpen={openTask} />}{page === 'goals' && <GoalsPage token={token} onOpenPlan={openPlan} />}{page === 'plans' && <PlansPage token={token} onOpen={openPlan} />}{page === 'plan-detail' && planID && <PlanDetailPage token={token} planID={planID} onOpenTask={openTask} />}{page === 'tasks' && <TasksPage token={token} onOpen={openTask} />}{page === 'reviews' && <ReviewPage token={token} />}{page === 'settings' && <SettingsPage token={token} account={account} onLogout={signOut} />}{page === 'imports' && <ImportsPage token={token} onOpenPlan={openPlan} />}</main>{selectedTask && <TaskDrawer token={token} task={selectedTask} running={running} onClose={() => setSelectedTask(null)} onChanged={changed} />}</div></SyncProvider>
 }

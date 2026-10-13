@@ -97,7 +97,7 @@ func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string,
 		return nil, err
 	}
 	var created *model.Milestone
-	err = s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err = s.withChange(ctx, userID, "milestone.created", func(repo Repository) error {
 		version, plan, err := s.versionAndPlan(ctx, repo, userID, versionID, true)
 		if err != nil {
 			return err
@@ -129,7 +129,7 @@ func (s *Service) CreateMilestone(ctx context.Context, userID, versionID string,
 
 func (s *Service) UpdateMilestone(ctx context.Context, userID, milestoneID string, input UpdateMilestoneInput) (*MilestoneView, error) {
 	var item model.Milestone
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "milestone.updated", func(repo Repository) error {
 		found, err := repo.Milestone(ctx, userID, milestoneID, true)
 		if err != nil {
 			return err
@@ -189,7 +189,7 @@ func (s *Service) UpdateMilestone(ctx context.Context, userID, milestoneID strin
 }
 
 func (s *Service) DeleteMilestone(ctx context.Context, userID, milestoneID string) error {
-	if err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	if err := s.withChange(ctx, userID, "milestone.deleted", func(repo Repository) error {
 		item, err := repo.Milestone(ctx, userID, milestoneID, true)
 		if err != nil {
 			return err
@@ -254,7 +254,7 @@ func (s *Service) CreateTask(ctx context.Context, userID, versionID string, inpu
 	}
 	var created *model.Task
 	var plan model.Plan
-	err = s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err = s.withChange(ctx, userID, "task.created", func(repo Repository) error {
 		version, foundPlan, err := s.versionAndPlan(ctx, repo, userID, versionID, true)
 		if err != nil {
 			return err
@@ -304,7 +304,7 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 	}
 	var updated model.Task
 	var plan model.Plan
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "task.updated", func(repo Repository) error {
 		task, err := repo.Task(ctx, userID, taskID, true)
 		if err != nil {
 			return err
@@ -416,7 +416,7 @@ func (s *Service) UpdateTask(ctx context.Context, userID, taskID string, input U
 }
 
 func (s *Service) DeleteTask(ctx context.Context, userID, taskID string) error {
-	if err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	if err := s.withChange(ctx, userID, "task.deleted", func(repo Repository) error {
 		task, err := repo.Task(ctx, userID, taskID, true)
 		if err != nil {
 			return err
@@ -442,7 +442,7 @@ func (s *Service) DeleteTask(ctx context.Context, userID, taskID string) error {
 func (s *Service) SetTaskStatus(ctx context.Context, userID, taskID, action string) (*TaskView, error) {
 	var updated model.Task
 	var plan model.Plan
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "task."+action, func(repo Repository) error {
 		task, err := repo.Task(ctx, userID, taskID, true)
 		if err != nil {
 			return err
@@ -512,7 +512,7 @@ func (s *Service) SetTaskStatus(ctx context.Context, userID, taskID, action stri
 
 func (s *Service) StartSession(ctx context.Context, userID, taskID string) (*SessionView, error) {
 	var session model.StudySession
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "session.started", func(repo Repository) error {
 		task, err := repo.Task(ctx, userID, taskID, true)
 		if err != nil {
 			return err
@@ -577,7 +577,7 @@ func (s *Service) DiscardSession(ctx context.Context, userID, sessionID string) 
 
 func (s *Service) endSession(ctx context.Context, userID, sessionID, status, note string) (*SessionView, error) {
 	var session model.StudySession
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "session."+status, func(repo Repository) error {
 		found, err := repo.Session(ctx, userID, sessionID, true)
 		if err != nil {
 			return err

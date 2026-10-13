@@ -54,6 +54,7 @@ func RegisterRoutes(router *gin.Engine, handler *HTTPHandler, auth gin.HandlerFu
 	api.PATCH("/milestones/:id", handler.updateMilestone)
 	api.DELETE("/milestones/:id", handler.deleteMilestone)
 	api.GET("/tasks", handler.listTasks)
+	api.GET("/tasks/:id", handler.getTask)
 	api.PATCH("/tasks/:id", handler.updateTask)
 	api.DELETE("/tasks/:id", handler.deleteTask)
 	api.POST("/tasks/:id/complete", handler.completeTask)
@@ -67,6 +68,12 @@ func RegisterRoutes(router *gin.Engine, handler *HTTPHandler, auth gin.HandlerFu
 	api.GET("/reviews/weekly", handler.weeklyReview)
 	api.GET("/preferences", handler.getPreferences)
 	api.PATCH("/preferences", handler.updatePreferences)
+}
+
+func (h *HTTPHandler) getTask(c *gin.Context) {
+	userID, _ := identity.UserID(c)
+	value, err := h.service.GetTask(c, userID, c.Param("id"))
+	write(c, value, err)
 }
 
 func (h *HTTPHandler) createGoal(c *gin.Context) {

@@ -31,7 +31,9 @@ jobs:
       - name: Test backend and MySQL integration
         env:
           TEST_MYSQL_DSN: studyflow:REDACTED@tcp(127.0.0.1:3306)/studyflow_test?charset=utf8mb4&parseTime=True&loc=UTC&multiStatements=true
-        run: go test ./...
+        run: |
+          go test -race ./...
+          go vet ./...
 
   frontend:
     runs-on: ubuntu-latest

@@ -213,6 +213,10 @@ func TestMCPToolsIntegration(t *testing.T) {
 		},
 		"tasks": []any{map[string]any{"title": "MCP 未分阶段任务", "estimate_minutes": 15}},
 	}
+	beforeNotification, err := service.repo.NotificationHead(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "import_plan_tree", Arguments: importArgs})
 	if err != nil {
 		t.Fatal(err)
@@ -221,6 +225,10 @@ func TestMCPToolsIntegration(t *testing.T) {
 		t.Fatalf("import failed: %s", textOf(result))
 	}
 	imported := decodeStructured[ImportPlanTreeOutput](t, result)
+	afterNotification, err := service.repo.NotificationHead(ctx, userID)
+	if err != nil || afterNotification.LastSequence != beforeNotification.LastSequence+1 {
+		t.Fatal("MCP import did not produce one atomic notification", err)
+	}
 	// 3 tasks inside the two milestones plus 1 unassigned.
 	if imported.Replayed || imported.Milestones != 2 || imported.Tasks != 4 {
 		t.Fatalf("unexpected import result: %+v", imported)
@@ -235,6 +243,10 @@ func TestMCPToolsIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	replayed := decodeStructured[ImportPlanTreeOutput](t, replay)
+	replayNotification, err := service.repo.NotificationHead(ctx, userID)
+	if err != nil || replayNotification.LastSequence != afterNotification.LastSequence {
+		t.Fatal("MCP replay generated a duplicate notification", err)
+	}
 	if !replayed.Replayed || replayed.PlanID != imported.PlanID || replayed.ImportID != imported.ImportID {
 		t.Fatalf("expected a replay of the same plan: %+v", replayed)
 	}

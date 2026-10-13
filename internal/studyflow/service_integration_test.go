@@ -934,6 +934,11 @@ func countRowsForKey(t *testing.T, db *gorm.DB, key string) int64 {
 }
 
 func cleanupUser(t *testing.T, db *gorm.DB, userID string) {
+	for _, table := range []string{"notification_outbox", "notification_streams"} {
+		if err := db.Exec("DELETE FROM "+table+" WHERE user_id = ?", userID).Error; err != nil {
+			t.Errorf("cleanup %s: %v", table, err)
+		}
+	}
 	t.Helper()
 	statements := []string{
 		"UPDATE plans SET active_version_id = NULL WHERE user_id = ?",

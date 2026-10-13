@@ -543,3 +543,15 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .import-history button:hover { border-color: #c8cfdb; background: var(--surface); }
 .import-history strong { overflow: hidden; font-size: 11px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
 .import-history span, .import-history em { color: var(--muted); font-size: 9px; font-style: normal; }
+.sync-edit-warning {
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border: 1px solid #e7cb92;
+  border-radius: 10px;
+  background: #fff8e9;
+  color: #745321;
+  font-size: 13px;
+}
+.sync-edit-warning p { margin: 0 0 10px; }
+.sync-edit-warning .button { margin-left: 8px; }
+.global-notice { padding: 10px 24px; background: #fff8e9; color: #745321; font-size: 13px; }

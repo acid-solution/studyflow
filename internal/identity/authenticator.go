@@ -20,6 +20,7 @@ import (
 )
 
 const ContextUserIDKey = "auth_user_id"
+const contextPrincipalKey = "auth_principal"
 
 var ErrInvalidToken = errors.New("invalid access token")
 
@@ -85,8 +86,15 @@ func (a *Authenticator) Middleware() gin.HandlerFunc {
 			return
 		}
 		c.Set(ContextUserIDKey, principal.UserID)
+		c.Set(contextPrincipalKey, principal)
 		c.Next()
 	}
+}
+
+func RequestPrincipal(c *gin.Context) (Principal, bool) {
+	value, ok := c.Get(contextPrincipalKey)
+	principal, valid := value.(Principal)
+	return principal, ok && valid
 }
 
 func (a *Authenticator) Parse(ctx context.Context, raw string) (Principal, error) {

@@ -244,6 +244,8 @@ type TaskView struct {
 	Status          string     `json:"status"`
 	Version         uint       `json:"version"`
 	Source          string     `json:"source"`
+	PlanStatus      string     `json:"plan_status,omitempty"`
+	VersionStatus   string     `json:"version_status,omitempty"`
 	CompletedAt     *time.Time `json:"completed_at"`
 	IsOverdue       bool       `json:"is_overdue"`
 }
@@ -266,16 +268,18 @@ func (s *Service) CreateGoal(ctx context.Context, userID string, input CreateGoa
 		SuccessCriteria: strings.TrimSpace(input.SuccessCriteria), TargetDate: target,
 		Status: model.GoalStatusActive, Version: 1,
 	}
-	if input.ParentGoalID != nil {
-		parent, err := s.repo.Goal(ctx, userID, *input.ParentGoalID, false)
-		if err != nil {
-			return nil, err
+	if err := s.withChange(ctx, userID, "goal.created", func(repo Repository) error {
+		if input.ParentGoalID != nil {
+			parent, err := repo.Goal(ctx, userID, *input.ParentGoalID, false)
+			if err != nil {
+				return err
+			}
+			if parent.Status != model.GoalStatusActive {
+				return ErrInvalidState
+			}
 		}
-		if parent.Status != model.GoalStatusActive {
-			return nil, ErrInvalidState
-		}
-	}
-	if err := s.repo.CreateGoal(ctx, &goal); err != nil {
+		return repo.CreateGoal(ctx, &goal)
+	}); err != nil {
 		return nil, err
 	}
 	s.invalidate(ctx, userID)
@@ -285,7 +289,7 @@ func (s *Service) CreateGoal(ctx context.Context, userID string, input CreateGoa
 
 func (s *Service) UpdateGoal(ctx context.Context, userID, goalID string, input UpdateGoalInput) (*GoalNode, error) {
 	var updated model.Goal
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "goal.updated", func(repo Repository) error {
 		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
@@ -362,7 +366,7 @@ func (s *Service) UpdateGoal(ctx context.Context, userID, goalID string, input U
 }
 
 func (s *Service) CompleteGoal(ctx context.Context, userID, goalID string, input CompletionInput) (*GoalNode, error) {
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "goal.achieved", func(repo Repository) error {
 		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
@@ -395,7 +399,7 @@ func (s *Service) CompleteGoal(ctx context.Context, userID, goalID string, input
 }
 
 func (s *Service) AbandonGoal(ctx context.Context, userID, goalID string, input AbandonInput) (*GoalNode, error) {
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "goal.abandoned", func(repo Repository) error {
 		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
@@ -424,7 +428,7 @@ func (s *Service) AbandonGoal(ctx context.Context, userID, goalID string, input 
 }
 
 func (s *Service) ReopenGoal(ctx context.Context, userID, goalID string) (*GoalNode, error) {
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "goal.reopened", func(repo Repository) error {
 		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
@@ -453,7 +457,7 @@ func (s *Service) UpdateGoalCompletionPolicy(ctx context.Context, userID, goalID
 	if input.ParentEffect != "block" && input.ParentEffect != "exclude" {
 		return nil, ErrValidation
 	}
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "goal.policy_changed", func(repo Repository) error {
 		goal, err := repo.Goal(ctx, userID, goalID, true)
 		if err != nil {
 			return err
@@ -660,7 +664,7 @@ func (s *Service) CreatePlan(ctx context.Context, userID, goalID string, input C
 	}
 	plan := model.Plan{ID: uuid.NewString(), UserID: userID, GoalID: goalID, Title: input.Title, Description: input.Description, Objective: input.Objective, SuccessCriteria: input.SuccessCriteria, TargetDate: targetDate, Status: model.GoalStatusActive, Revision: 1, Source: model.SourceUser}
 	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, Mode: input.Mode, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: startDate, EndDate: endDate, StructureRevision: 1}
-	if err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	if err := s.withChange(ctx, userID, "plan.created", func(repo Repository) error {
 		return s.insertPlanWithVersion(ctx, repo, userID, goalID, plan, version)
 	}); err != nil {
 		return nil, err
@@ -673,7 +677,7 @@ func (s *Service) UpdatePlan(ctx context.Context, userID, planID string, input U
 	if input.Revision == 0 {
 		return nil, ErrValidation
 	}
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "plan.updated", func(repo Repository) error {
 		plan, err := repo.Plan(ctx, userID, planID, true)
 		if err != nil {
 			return err
@@ -741,7 +745,7 @@ func (s *Service) UpdatePlan(ctx context.Context, userID, planID string, input U
 }
 
 func (s *Service) CompletePlan(ctx context.Context, userID, planID string, input CompletionInput) (*PlanDetail, error) {
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "plan.achieved", func(repo Repository) error {
 		plan, err := repo.Plan(ctx, userID, planID, true)
 		if err != nil {
 			return err
@@ -783,7 +787,7 @@ func (s *Service) AbandonPlan(ctx context.Context, userID, planID string, input 
 	if input.ParentEffect != "block" && input.ParentEffect != "exclude" {
 		return nil, ErrValidation
 	}
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "plan.abandoned", func(repo Repository) error {
 		plan, err := repo.Plan(ctx, userID, planID, true)
 		if err != nil {
 			return err
@@ -812,7 +816,7 @@ func (s *Service) AbandonPlan(ctx context.Context, userID, planID string, input 
 }
 
 func (s *Service) ReopenPlan(ctx context.Context, userID, planID string) (*PlanDetail, error) {
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "plan.reopened", func(repo Repository) error {
 		plan, err := repo.Plan(ctx, userID, planID, true)
 		if err != nil {
 			return err
@@ -841,7 +845,7 @@ func (s *Service) UpdatePlanCompletionPolicy(ctx context.Context, userID, planID
 	if input.ParentEffect != "block" && input.ParentEffect != "exclude" {
 		return nil, ErrValidation
 	}
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "plan.policy_changed", func(repo Repository) error {
 		plan, err := repo.Plan(ctx, userID, planID, true)
 		if err != nil {
 			return err
@@ -935,7 +939,7 @@ func (s *Service) GetPlan(ctx context.Context, userID, planID string) (*PlanDeta
 
 func (s *Service) CreatePlanVersion(ctx context.Context, userID, planID string, input CreatePlanVersionInput) (*VersionView, error) {
 	var created model.PlanVersion
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "plan_version.created", func(repo Repository) error {
 		plan, err := repo.Plan(ctx, userID, planID, true)
 		if err != nil {
 			return err
@@ -1035,7 +1039,7 @@ func (s *Service) CreatePlanVersion(ctx context.Context, userID, planID string, 
 
 func (s *Service) UpdatePlanVersion(ctx context.Context, userID, versionID string, input UpdatePlanVersionInput) (*VersionView, error) {
 	var updated model.PlanVersion
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "plan_version.updated", func(repo Repository) error {
 		version, plan, err := s.versionAndPlan(ctx, repo, userID, versionID, true)
 		if err != nil {
 			return err
@@ -1121,7 +1125,7 @@ func (s *Service) UpdatePlanVersion(ctx context.Context, userID, versionID strin
 
 func (s *Service) CancelPlanVersion(ctx context.Context, userID, versionID string) (*VersionView, error) {
 	var updated model.PlanVersion
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "plan_version.canceled", func(repo Repository) error {
 		version, plan, err := s.versionAndPlan(ctx, repo, userID, versionID, true)
 		if err != nil {
 			return err
@@ -1148,7 +1152,7 @@ func (s *Service) CancelPlanVersion(ctx context.Context, userID, versionID strin
 
 func (s *Service) ActivatePlanVersion(ctx context.Context, userID, versionID string) (*PlanDetail, error) {
 	var planID string
-	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err := s.withChange(ctx, userID, "plan_version.activated", func(repo Repository) error {
 		version, err := repo.PlanVersion(ctx, userID, versionID, true)
 		if err != nil {
 			return err

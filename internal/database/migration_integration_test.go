@@ -32,6 +32,23 @@ func TestMigrationsFromEmptyAndRollback(t *testing.T) {
 	if err := goose.Up(sqlDB, "../../migrations"); err != nil {
 		t.Fatalf("migrate an empty database: %v", err)
 	}
+	const preservedGoal = "00000000-0000-4000-8000-000000000007"
+	if _, err := sqlDB.Exec("INSERT INTO goals (id,user_id,title,description,success_criteria,status,version,created_at,updated_at) VALUES (?,?,'preserved','','','active',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))", preservedGoal, preservedGoal); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.DownTo(sqlDB, "../../migrations", 6); err != nil {
+		t.Fatalf("roll back notifications: %v", err)
+	}
+	if columnExists(t, sqlDB, "notification_streams", "last_sequence") {
+		t.Fatal("notification tables survived rollback")
+	}
+	if err := goose.Up(sqlDB, "../../migrations"); err != nil {
+		t.Fatal(err)
+	}
+	var title string
+	if err := sqlDB.QueryRow("SELECT title FROM goals WHERE id = ?", preservedGoal).Scan(&title); err != nil || title != "preserved" {
+		t.Fatalf("existing business data changed during notification upgrade: %q %v", title, err)
+	}
 	if err := goose.DownTo(sqlDB, "../../migrations", 4); err != nil {
 		t.Fatalf("roll back the plan semantics migration: %v", err)
 	}
@@ -42,9 +59,11 @@ func TestMigrationsFromEmptyAndRollback(t *testing.T) {
 		t.Fatalf("reapply the plan semantics migration: %v", err)
 	}
 	for table, column := range map[string]string{
-		"plans":         "objective",
-		"plan_versions": "mode",
-		"goals":         "excluded_from_parent_completion",
+		"plans":                "objective",
+		"plan_versions":        "mode",
+		"goals":                "excluded_from_parent_completion",
+		"notification_streams": "pruned_through",
+		"notification_outbox":  "sequence",
 	} {
 		if !columnExists(t, sqlDB, table, column) {
 			t.Fatalf("expected %s.%s after migration", table, column)

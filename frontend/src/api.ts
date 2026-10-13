@@ -41,11 +41,19 @@ export async function login(email: string, password: string) {
   }))
 }
 
-export async function refreshAccess() {
-  return json<TokenIssue>(await fetch(`${AUTH_URL}/auth/v1/token/refresh`, {
+let refreshInFlight: Promise<TokenIssue> | null = null
+
+export function refreshAccess(): Promise<TokenIssue> {
+  if (refreshInFlight) return refreshInFlight
+  const perform = async () => json<TokenIssue>(await fetch(`${AUTH_URL}/auth/v1/token/refresh`, {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ client_id: 'studyflow' }),
   }))
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
+  const result = locks ? Promise.resolve(locks.request('studyflow-auth-refresh', perform)).then((issue) => issue) : perform()
+  const pending = result.finally(() => { refreshInFlight = null })
+  refreshInFlight = pending
+  return pending
 }
 
 export async function logout() {

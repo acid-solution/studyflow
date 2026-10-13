@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -225,7 +226,7 @@ func (s *Service) ImportPlanTree(ctx context.Context, userID, idempotencyKey str
 	version := model.PlanVersion{ID: uuid.NewString(), UserID: userID, PlanID: plan.ID, VersionNo: 1, Status: model.PlanVersionDraft, Mode: input.Mode, WeeklyCapacityMinutes: input.WeeklyCapacityMinutes, StartDate: parseCanonicalDate(input.StartDate), EndDate: parseCanonicalDate(input.EndDate), StructureRevision: 1}
 	receipt := model.PlanImport{ID: importID, UserID: userID, IdempotencyKey: key, RequestDigest: digest, PlanID: plan.ID, PlanVersionID: version.ID, CreatedAt: s.now().UTC()}
 
-	err = s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	err = s.withChange(ctx, userID, "plan.imported", func(repo Repository) error {
 		if err := s.insertPlanWithVersion(ctx, repo, userID, input.GoalID, plan, version); err != nil {
 			return err
 		}
@@ -317,6 +318,13 @@ func insertImportedTask(ctx context.Context, repo Repository, userID, versionID 
 // Dates are stored back in the single layout parseDate accepts, so the digest
 // covers the value that is actually persisted.
 func normalizeImportInput(input ImportPlanTreeInput) (ImportPlanTreeInput, error) {
+	// Callers can reuse the same payload for concurrent idempotent retries. Own
+	// the nested slices before normalization rather than mutating their storage.
+	input.Milestones = slices.Clone(input.Milestones)
+	for index := range input.Milestones {
+		input.Milestones[index].Tasks = slices.Clone(input.Milestones[index].Tasks)
+	}
+	input.Tasks = slices.Clone(input.Tasks)
 	planInput, targetDate, startDate, endDate, err := normalizePlanInput(CreatePlanInput{
 		Title:                 input.Title,
 		Description:           input.Description,

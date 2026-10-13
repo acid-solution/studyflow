@@ -19,6 +19,7 @@ JobPilot 可以通过 MCP 导入项目实践与知识准备两份计划。首次
 - 周报统计完成数、预算与实际投入、按期完成率、逾期数、改期次数、每日投入和各计划投入。
 - MySQL 版本化 Migration、UUID 用户隔离、shared-auth JWKS 本地验签。
 - React 前端已接入真实 API，包括「计划导入」页：粘贴路线草稿、核对摘要、确认导入，重复确认会重放而不是重复建。
+- 事务 Outbox 与 SSE 多端同步，支持按用户隔离、7 天断线补发、重复事件过滤及未保存输入保护，见 [事件通知](docs/notifications.md)。
 
 ## 技术栈
 
@@ -30,7 +31,7 @@ JobPilot 可以通过 MCP 导入项目实践与知识准备两份计划。首次
 | 身份 | shared-auth、RS256 JWT、JWKS |
 | 工程 | Docker Compose、GitHub Actions |
 
-首轮没有引入 Redis。周报和工作台直接从 MySQL 查询，后续只有在真实性能数据证明需要时才增加缓存。
+Redis 只缓存聚合查询；MySQL 保存业务数据、导入回执与可靠通知事件。
 
 ## 后端分层
 
@@ -165,6 +166,7 @@ docker compose --env-file .env.compose up --build -d
 | GET | `/api/v1/plan-imports` | 导入记录（跨系统写入的审计） |
 | PATCH/DELETE | `/api/v1/milestones/:id` | 编辑或删除草稿阶段 |
 | GET/PATCH/DELETE | `/api/v1/tasks`、`/api/v1/tasks/:id` | 筛选、编辑或删除草稿任务 |
+| GET | `/api/v1/tasks/:id` | 最新任务详情、所属计划及版本状态 |
 | POST | `/api/v1/tasks/:id/complete` | 完成任务 |
 | POST | `/api/v1/tasks/:id/reopen` | 重新打开 |
 | POST | `/api/v1/tasks/:id/cancel` | 取消任务 |
@@ -175,6 +177,7 @@ docker compose --env-file .env.compose up --build -d
 | GET | `/api/v1/dashboard/today` | 今日工作台 |
 | GET | `/api/v1/reviews/weekly` | 周度复盘 |
 | GET/PATCH | `/api/v1/preferences` | 用户偏好 |
+| GET | `/api/v1/events` | 当前账号 SSE 通知，支持 Last-Event-ID 补发 |
 
 ## 计划树批量导入
 
@@ -295,6 +298,8 @@ compose 里的 redis 故意关掉了持久化（`--save "" --appendonly no`）�
 
 ```powershell
 go test ./...
+go test -race ./...
+go vet ./...
 
 Set-Location frontend
 npm test
