@@ -19,6 +19,10 @@ import (
 // service keep business decisions and transaction boundaries together without
 // depending on GORM.
 type Repository interface {
+	LockLearningRoute(context.Context, string, string) (*model.LearningRouteBinding, error)
+	SaveLearningRoute(context.Context, *model.LearningRouteBinding) error
+	CreateLearningRouteImport(context.Context, *model.LearningRouteImport) error
+	LearningRouteImport(context.Context, string, string) (*model.LearningRouteImport, error)
 	WithinTransaction(context.Context, func(Repository) error) error
 
 	CreateGoal(context.Context, *model.Goal) error

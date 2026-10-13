@@ -11,6 +11,7 @@ import (
 )
 
 type Config struct {
+	MCPResource   string
 	Port          string
 	MySQLDSN      string
 	MigrationsDir string
@@ -39,6 +40,7 @@ type Config struct {
 func Load() (Config, error) {
 	_ = godotenv.Load()
 	cfg := Config{
+		MCPResource:   strings.TrimSpace(os.Getenv("STUDYFLOW_MCP_RESOURCE")),
 		Port:          valueOrDefault("PORT", "8081"),
 		MySQLDSN:      strings.TrimSpace(os.Getenv("MYSQL_DSN")),
 		MigrationsDir: valueOrDefault("MIGRATIONS_DIR", "migrations"),

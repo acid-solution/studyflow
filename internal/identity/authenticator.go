@@ -44,6 +44,7 @@ type jwks struct {
 }
 
 type claims struct {
+	Delegated bool   `json:"delegated,omitempty"`
 	SessionID string `json:"sid"`
 	jwt.RegisteredClaims
 }
@@ -103,7 +104,7 @@ func (a *Authenticator) Parse(ctx context.Context, raw string) (Principal, error
 		return Principal{}, ErrInvalidToken
 	}
 	values, ok := parsed.Claims.(*claims)
-	if !ok || values.Subject == "" || values.SessionID == "" {
+	if !ok || values.Subject == "" || values.SessionID == "" || values.Delegated || len(values.Audience) != 1 || values.Audience[0] != a.audience {
 		return Principal{}, ErrInvalidToken
 	}
 	if _, err := uuid.Parse(values.Subject); err != nil {

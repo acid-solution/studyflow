@@ -103,10 +103,54 @@ func TestMCPToolsIntegration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	authenticator := identity.NewAuthenticator(jwksServer.URL, "shared-auth", "studyflow", time.Minute)
-	RegisterMCP(router, service, authenticator, nil)
+	const resource = "http://127.0.0.1:8081/mcp"
+	RegisterMCP(router, service, authenticator, nil, resource)
 	api := httptest.NewServer(router)
 	defer api.Close()
 	endpoint := api.URL + "/mcp"
+	t.Run("delegated route import only", func(t *testing.T) {
+		payload := testRoutePayload()
+		key := uuid.NewString()
+		digest, err := LearningRouteDigest(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC()
+		claims := jwt.MapClaims{"iss": "shared-auth", "sub": userID, "sid": uuid.NewString(), "aud": resource, "iat": now.Unix(), "exp": now.Add(time.Minute).Unix(), "delegated": true, "act": map[string]string{"sub": "jobpilot"}, "scope": "learning_route:import learning_route:read", "import_key": key, "content_digest": digest}
+		value := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+		value.Header["kid"] = kid
+		raw, err := value.SignedString(privateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delegated, err := connectMCP(ctx, endpoint, raw, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer delegated.Close()
+		result, err := delegated.CallTool(ctx, &mcp.CallToolParams{Name: "import_learning_route", Arguments: LearningRouteArgs{IdempotencyKey: key, Payload: payload}})
+		if err != nil || result.IsError {
+			t.Fatalf("route import failed: %v %v", err, result)
+		}
+		receipt := decodeStructured[LearningRouteReceipt](t, result)
+		if receipt.ContentDigest != digest || len(receipt.Plans) != 2 {
+			t.Fatal("wrong receipt")
+		}
+		result, err = delegated.CallTool(ctx, &mcp.CallToolParams{Name: "query_progress", Arguments: QueryProgressArgs{}})
+		if err == nil && !result.IsError {
+			t.Fatal("delegation allowed ordinary tool")
+		}
+		changed := payload
+		changed.GoalTitle = "changed"
+		result, err = delegated.CallTool(ctx, &mcp.CallToolParams{Name: "import_learning_route", Arguments: LearningRouteArgs{IdempotencyKey: key, Payload: changed}})
+		if err == nil && !result.IsError {
+			t.Fatal("delegation allowed altered payload")
+		}
+		result, err = delegated.CallTool(ctx, &mcp.CallToolParams{Name: "get_learning_route_import", Arguments: RouteReceiptArgs{IdempotencyKey: key}})
+		if err != nil || result.IsError {
+			t.Fatal("receipt query failed", err)
+		}
+	})
 
 	// The token itself must pass the same check the REST API applies.
 	if _, err := authenticator.Parse(ctx, sign("studyflow")); err != nil {

@@ -202,13 +202,13 @@ function PlansPage({ token, onOpen }: { token: string; onOpen: (id: string) => v
 
 function PlanDetailPage({ token, planID, onOpenTask }: { token: string; planID: string; onOpenTask: (task: Task, reload: () => void) => void }) {
   const { data, error, reload } = useLoad(() => api<PlanDetail>(token, `/plans/${planID}`), [token, planID])
-  const [selectedID, setSelectedID] = useState('')
+  const [selectedID, setSelectedID] = useState(() => new URLSearchParams(window.location.search).get('version_id') ?? '')
   const [milestoneTitle, setMilestoneTitle] = useState('')
   const [taskTitle, setTaskTitle] = useState('')
   const [taskMilestone, setTaskMilestone] = useState('')
   const [taskDate, setTaskDate] = useState('')
   const [notice, setNotice] = useState('')
-  useEffect(() => { if (data) { const preferred = data.versions.find((version) => version.status === 'draft') ?? data.versions.find((version) => version.status === 'active') ?? data.versions[0]; setSelectedID(preferred?.id ?? '') } }, [data])
+  useEffect(() => { if (data) { const requested = new URLSearchParams(window.location.search).get('version_id'); const preferred = data.versions.find((version) => version.id === requested) ?? data.versions.find((version) => version.status === 'draft') ?? data.versions.find((version) => version.status === 'active') ?? data.versions[0]; setSelectedID(preferred?.id ?? '') } }, [data])
   if (!data) return <PageFrame eyebrow="计划详情" title="读取计划" description="正在加载版本和任务树。"><LoadingBlock error={error} /></PageFrame>
   const selected = data.versions.find((version) => version.id === selectedID) ?? data.versions[0]
   const run = async (job: () => Promise<unknown>) => { setNotice(''); try { await job(); await reload() } catch (reason) { setNotice(messageOf(reason)) } }
@@ -456,8 +456,8 @@ export default function App() {
   const [token, setToken] = useState('')
   const [account, setAccount] = useState<Account | null>(null)
   const [booting, setBooting] = useState(true)
-  const [page, setPage] = useState<Page>('today')
-  const [planID, setPlanID] = useState('')
+  const [page, setPage] = useState<Page>(() => new URLSearchParams(window.location.search).has('plan_id') ? 'plan-detail' : new URLSearchParams(window.location.search).has('goal_id') ? 'goals' : 'today')
+  const [planID, setPlanID] = useState(() => new URLSearchParams(window.location.search).get('plan_id') ?? '')
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
   const [drawerReload, setDrawerReload] = useState<(() => void) | null>(null)
   const [running, setRunning] = useState<Session | null>(null)

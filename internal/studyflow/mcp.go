@@ -103,8 +103,12 @@ type MCPHandler struct{ service *Service }
 
 // RegisterMCP mounts the MCP endpoint on the same router as the REST API, so one
 // process owns the database connection and the goose migrations.
-func RegisterMCP(router *gin.Engine, service *Service, authenticator *identity.Authenticator, logger *slog.Logger) {
+func RegisterMCP(router *gin.Engine, service *Service, authenticator *identity.Authenticator, logger *slog.Logger, resources ...string) {
 	handler := &MCPHandler{service: service}
+	resource := ""
+	if len(resources) > 0 {
+		resource = resources[0]
+	}
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "studyflow", Version: "v1.0.0"},
 		&mcp.ServerOptions{
@@ -112,6 +116,10 @@ func RegisterMCP(router *gin.Engine, service *Service, authenticator *identity.A
 			Instructions: "StudyFlow 是任务执行端：它保存已经确定好内容和日期的任务，不负责拆解目标或决定任务安排在哪一天。导入的计划会落在草稿版本上，需要用户确认激活后才进入执行。",
 		},
 	)
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "import_learning_route", Description: "原子导入已确认的学习路线，首次创建求职目标和两份计划草稿；后续仅新增已调整计划的草稿，不覆盖执行进度。已有草稿需先激活或取消。",
+	}, handler.importLearningRoute)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_learning_route_import", Description: "按导入键查询当前账号的真实学习路线导入回执，响应丢失时用同键核实。"}, handler.getLearningRouteImport)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "import_plan_tree",
 		Description: "把一条已经确定好的学习路线一次事务导入成计划树：计划 + V1 草稿 + 阶段 + 任务。必须带上调用方生成的幂等键；超时重试请复用同一个键，重复请求会返回第一次的结果而不是再建一份。任何校验失败都会整批回滚。",
@@ -137,7 +145,11 @@ func RegisterMCP(router *gin.Engine, service *Service, authenticator *identity.A
 	verifier := func(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 		principal, err := authenticator.Parse(ctx, token)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
+			delegation, e := authenticator.ParseDelegation(ctx, token, resource)
+			if e != nil {
+				return nil, auth.ErrInvalidToken
+			}
+			return &auth.TokenInfo{UserID: delegation.Subject, Expiration: delegation.ExpiresAt.Time, Scopes: strings.Fields(delegation.Scope), Extra: map[string]any{"delegated": true, "import_key": delegation.ImportKey, "content_digest": delegation.ContentDigest}}, nil
 		}
 		// The SDK middleware insists on an expiry, so pass along the one the token
 		// declared rather than inventing a fresh window.
@@ -303,6 +315,9 @@ func mcpUserID(req *mcp.CallToolRequest) (string, error) {
 	extra := req.GetExtra()
 	if extra == nil || extra.TokenInfo == nil || extra.TokenInfo.UserID == "" {
 		return "", errors.New("请求没有通过身份校验")
+	}
+	if delegated, _ := extra.TokenInfo.Extra["delegated"].(bool); delegated {
+		return "", errors.New("代办令牌只允许学习路线导入和回执查询")
 	}
 	return extra.TokenInfo.UserID, nil
 }
