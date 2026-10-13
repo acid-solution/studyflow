@@ -2,7 +2,7 @@
 
 JobPilot 负责规划，StudyFlow 负责执行。MCP 新增 `import_learning_route` 和 `get_learning_route_import`，原有三个工具继续保留。
 
-首次导入原子创建求职目标、项目实践计划与知识准备计划及两份草稿；后续相同来源路线仅为内容改变的计划增加草稿。路线版本与执行版本各自编号。知识单独更新不会替换项目任务、计时或改期记录。若计划已有草稿，先在 StudyFlow 中激活或取消，不自动覆盖。
+首次导入原子创建求职目标、项目实践计划与知识准备计划及两份草稿版本；后续相同来源路线仅为内容改变的计划增加草稿版本。路线版本与计划版本各自编号。知识单独更新不会替换项目任务、计时或改期记录。若计划已有草稿版本，先在 StudyFlow 中激活或取消，不自动覆盖。
 
 导入参数由固定 `idempotency_key` 和 `payload` 组成。payload 包含 `source_route_id`、`source_version`、`goal_title`、`goal_description`、`weekly_total_minutes` 和 plans；每项包含 role（project/knowledge）与复用现有导入格式的 plan。首次必须包含两项。每份最多 50 阶段、200 任务。课时任务不能带日期；总周预算不得超出声明的总投入。
 
