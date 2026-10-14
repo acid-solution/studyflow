@@ -203,13 +203,30 @@ function PlanDetailPage({ token, planID, onOpenTask }: { token: string; planID: 
   const [taskMilestone, setTaskMilestone] = useState('')
   const [taskDate, setTaskDate] = useState('')
   const [notice, setNotice] = useState('')
-  useEffect(() => { if (data) { const requested = new URLSearchParams(window.location.search).get('version_id'); const preferred = data.versions.find((version) => version.id === requested) ?? data.versions.find((version) => version.status === 'draft') ?? data.versions.find((version) => version.status === 'active') ?? data.versions[0]; setSelectedID((current) => data.versions.some((version) => version.id === current) ? current : preferred?.id ?? '') } }, [data])
+  const [showCanceled, setShowCanceled] = useState(false)
+  useEffect(() => { setShowCanceled(false) }, [planID])
+  useEffect(() => { if (data) {
+    const visible = data.versions.filter(version => showCanceled || version.status !== 'canceled')
+    const requested = new URLSearchParams(window.location.search).get('version_id')
+    setSelectedID(current => {
+      const previous = data.versions.find(version => version.id === current)
+      if (previous?.status === 'canceled' && !showCanceled) return visible.find(version => version.status === 'active')?.id ?? visible[0]?.id ?? ''
+      if (visible.some(version => version.id === current)) return current
+      return (visible.find(version => version.id === requested) ?? visible.find(version => version.status === 'draft') ?? visible.find(version => version.status === 'active') ?? visible[0])?.id ?? ''
+    })
+  } }, [data, showCanceled])
   if (!data) return <PageFrame eyebrow="计划详情" title="读取计划" description="正在加载版本和任务树。"><LoadingBlock error={error} /></PageFrame>
-  const selected = data.versions.find((version) => version.id === selectedID) ?? data.versions[0]
+  const visibleVersions = data.versions.filter(version => showCanceled || version.status !== 'canceled')
+  const selected = visibleVersions.find(version => version.id === selectedID) ?? visibleVersions.find(version => version.status === 'active') ?? visibleVersions[0] ?? data.versions[0]
   const run = async (job: () => Promise<unknown>) => { setNotice(''); try { await job(); await reload() } catch (reason) { setNotice(messageOf(reason)) } }
   const addMilestone = async (event: FormEvent) => { event.preventDefault(); await run(async () => { await api(token, `/plan-versions/${selected.id}/milestones`, { method: 'POST', body: JSON.stringify({ title: milestoneTitle }) }); setMilestoneTitle('') }) }
   const addTask = async (event: FormEvent) => { event.preventDefault(); await run(async () => { await api(token, `/plan-versions/${selected.id}/tasks`, { method: 'POST', body: JSON.stringify({ title: taskTitle, milestone_id: taskMilestone || undefined, scheduled_date: selected.mode === 'calendar' && taskDate ? taskDate : undefined, estimate_minutes: 60 }) }); setTaskTitle(''); setTaskDate('') }) }
   const activate = () => run(() => api(token, `/plan-versions/${selected.id}/activate`, { method: 'POST' }))
+  const cancelDraft = () => run(async () => {
+    await api(token, `/plan-versions/${selected.id}/cancel`, { method: 'POST' })
+    setShowCanceled(false)
+    setSelectedID(data.versions.find(version => version.status === 'active')?.id ?? '')
+  })
   const createVersion = async (creationMode: 'blank' | 'copy') => {
     if (creationMode === 'blank') {
       const chosen = window.prompt('空白版本使用哪种推进模式？输入 calendar 或 sequence', selected.mode)
@@ -240,11 +257,19 @@ function PlanDetailPage({ token, planID, onOpenTask }: { token: string; planID: 
   const togglePolicy = () => run(() => api(token, `/plans/${data.plan.id}/completion-policy`, { method: 'PATCH', body: JSON.stringify({ parent_effect: data.plan.excluded_from_goal_completion ? 'block' : 'exclude' }) }))
   const hasDraft = data.versions.some((version) => version.status === 'draft')
   const canEditTasks = data.plan.status === 'active' && (selected.status === 'draft' || selected.status === 'active')
+  const canceledCount = data.versions.filter(version => version.status === 'canceled').length
+  if (!visibleVersions.length) return <PageFrame eyebrow="计划详情" title={data.plan.title} description={data.plan.description}>
+    <p className="muted-copy">没有当前版本或可用草稿。已取消的草稿不会参与学习执行。</p>
+    {notice && <p className="drawer-error">{notice}</p>}
+    <div className="topbar-actions">{canceledCount > 0 && <button className="button" onClick={() => setShowCanceled(true)}>查看已取消草稿（{canceledCount}）</button>}{data.plan.status === 'active' && <button className="button" onClick={() => void createVersion('blank')}>新建草稿</button>}</div>
+  </PageFrame>
   return <PageFrame eyebrow={selected.mode === 'calendar' ? '按日期版本' : '按课时版本'} title={data.plan.title} description={data.plan.description || '每个版本是一套独立方案，切换不会合并进度。'} action={<div className="topbar-actions">{data.plan.status === 'active' ? <><button className="button" onClick={complete}>确认达成</button><button className="button" onClick={abandon}>放弃计划</button></> : <><button className="button button-primary" onClick={reopen}>恢复计划</button>{data.plan.status === 'abandoned' && <button className="button" onClick={togglePolicy}>{data.plan.excluded_from_goal_completion ? '改为阻塞上层' : '改为从上层排除'}</button>}</>}</div>}>
     <section className="summary-strip plan-summary-strip"><div><span>计划目标</span><strong>{data.plan.objective}</strong></div><div><span>完成标准</span><strong>{data.plan.success_criteria || '由你最终判断'}</strong></div><div><span>目标日期</span><strong>{data.plan.target_date || '未设置'}</strong></div><div><span>计划状态</span><strong>{data.plan.status === 'active' ? '进行中' : data.plan.status === 'achieved' ? '已达成' : '已放弃'}</strong></div></section>
     {notice && <p className="drawer-error">{notice}</p>}
-    <div className="version-tabs">{data.versions.map((version) => <button key={version.id} className={version.id === selected.id ? 'is-current' : ''} onClick={() => setSelectedID(version.id)}>V{version.version_no}<span>{version.status === 'draft' ? '草稿' : version.status === 'active' ? '当前版本' : version.status === 'canceled' ? '已取消' : '历史只读'}</span></button>)}</div>
-    {data.plan.status === 'active' && <div className="topbar-actions">{!hasDraft && <><button className="button" onClick={() => void createVersion('blank')}><Plus size={15} />空白版本</button><button className="button" onClick={() => void createVersion('copy')}>以 V{selected.version_no} 为模板</button></>}{selected.status === 'draft' && <><button className="button" onClick={editVersion}>编辑版本设置</button><button className="button" onClick={() => run(() => api(token, `/plan-versions/${selected.id}/cancel`, { method: 'POST' }))}>取消草稿</button><button className="button button-primary" onClick={activate}>激活 V{selected.version_no}</button></>}{selected.status === 'superseded' && <button className="button button-primary" onClick={activate}>切换到 V{selected.version_no}</button>}</div>}
+    <div className="version-tabs">{visibleVersions.map((version) => <button key={version.id} className={version.id === selected.id ? 'is-current' : ''} onClick={() => setSelectedID(version.id)}>V{version.version_no}<span>{version.status === 'draft' ? '草稿' : version.status === 'active' ? '当前版本' : version.status === 'canceled' ? '已取消' : '历史只读'}</span></button>)}</div>
+    {canceledCount > 0 && <button className="button" onClick={() => setShowCanceled(value => !value)}>{showCanceled ? '收起已取消草稿' : `查看已取消草稿（${canceledCount}）`}</button>}
+    {selected.status === 'canceled' && <p className="muted-copy">此草稿已取消，仅保留记录，不会参与学习执行，也不能激活。</p>}
+    {data.plan.status === 'active' && <div className="topbar-actions">{!hasDraft && <><button className="button" onClick={() => void createVersion('blank')}><Plus size={15} />空白版本</button>{selected.status !== 'canceled' && <button className="button" onClick={() => void createVersion('copy')}>以 V{selected.version_no} 为模板</button>}</>}{selected.status === 'draft' && <><button className="button" onClick={editVersion}>编辑版本设置</button><button className="button" onClick={cancelDraft}>取消草稿</button><button className="button button-primary" onClick={activate}>激活 V{selected.version_no}</button></>}{selected.status === 'superseded' && <button className="button button-primary" onClick={activate}>切换到 V{selected.version_no}</button>}</div>}
     {data.plan.status === 'active' && selected.status === 'draft' && <form className="quick-add" onSubmit={addMilestone}><div><strong>新增阶段</strong><span>把计划拆成有明确结果的阶段</span></div><input required value={milestoneTitle} onChange={(event) => setMilestoneTitle(event.target.value)} placeholder="阶段名称" /><span /><button className="button button-primary">添加</button></form>}
     {canEditTasks && <form className="quick-add" onSubmit={addTask}><div><strong>新增任务</strong><span>{selected.status === 'active' ? '新任务会立即进入当前计划' : '任务可暂时不归入阶段'}</span></div><input required value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="任务名称" /><select value={taskMilestone} onChange={(event) => setTaskMilestone(event.target.value)}><option value="">未分阶段</option>{selected.milestones.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select>{selected.mode === 'calendar' && <input type="date" value={taskDate} onChange={(event) => setTaskDate(event.target.value)} />}<button className="button button-primary">添加</button></form>}
     <section className="detail-layout"><div className="detail-main"><Unassigned tasks={selected.unassigned_tasks} onOpen={(task) => onOpenTask({ ...task, plan_id: data.plan.id, plan_title: data.plan.title, plan_mode: selected.mode, plan_status: data.plan.status, version_status: selected.status }, reload)} /><div className="stage-list">{selected.milestones.map((milestone) => <MilestoneCard key={milestone.id} milestone={milestone} onOpen={(task) => onOpenTask({ ...task, plan_id: data.plan.id, plan_title: data.plan.title, plan_mode: selected.mode, plan_status: data.plan.status, version_status: selected.status }, reload)} />)}</div></div><aside className="detail-aside"><section><h3>版本信息</h3><dl><div><dt>版本</dt><dd>V{selected.version_no}</dd></div><div><dt>状态</dt><dd>{selected.status}</dd></div><div><dt>推进方式</dt><dd>{selected.mode === 'calendar' ? '按日期' : '按课时'}</dd></div><div><dt>每周投入</dt><dd>{minutes(selected.weekly_capacity_minutes)}</dd></div><div><dt>模板来源</dt><dd>{selected.source_version_id ? `版本 ${data.versions.find((item) => item.id === selected.source_version_id)?.version_no ?? '历史'}` : '空白创建'}</dd></div></dl></section>{selected.status === 'superseded' && <p className="muted-copy">历史版本只读；切换为当前版本后才能继续执行。</p>}</aside></section>
