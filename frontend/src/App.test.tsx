@@ -69,7 +69,9 @@ describe('StudyFlow authentication entry', () => {
     fireEvent.click(await screen.findByRole('button', { name: '新建计划' }))
     fireEvent.change(screen.getByPlaceholderText('计划名称'), { target: { value: '鉴权学习计划' } })
     fireEvent.change(screen.getByPlaceholderText('完成计划后要达成什么目标'), { target: { value: '能够独立实现鉴权系统' } })
-    fireEvent.click(screen.getByRole('button', { name: '创建' }))
+    fireEvent.change(screen.getByRole('combobox', { name: /所属目标/ }), { target: { value: goal.id } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '创建并安排任务' }))
 
     await waitFor(() => {
       const call = vi.mocked(api).mock.calls.find(([, path, options]) => path === `/goals/${goal.id}/plans` && options?.method === 'POST')
@@ -142,7 +144,8 @@ describe('StudyFlow authentication entry', () => {
 
     render(<App />)
     fireEvent.click(await screen.findByRole('button', { name: '目标' }))
-    fireEvent.click(await screen.findByRole('button', { name: '确认完成' }))
+    fireEvent.click(await screen.findByText('更多'))
+    fireEvent.click(screen.getByRole('button', { name: '确认完成' }))
 
     await waitFor(() => expect(completionAttempts).toBe(2))
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('仍有 1 个直属子项未达成'))
