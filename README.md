@@ -296,6 +296,8 @@ compose 里的 redis 故意关掉了持久化（`--save "" --appendonly no`）�
 
 ## 验证
 
+GitHub Actions 的数据库测试、独立迁移回滚测试和联合部署发布配置见 [CI/CD 说明](docs/ci-cd.md)。自动部署需在服务器首次验收后开启。
+
 ```powershell
 go test ./...
 go test -race ./...
