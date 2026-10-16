@@ -101,7 +101,8 @@ export type Dashboard = {
   running_session: { session: Session; task: Task } | null
 }
 
-export type Preferences = { timezone: string; week_start: 'monday' | 'sunday'; default_plan_mode: PlanMode; show_completed_today: boolean }
+export type AbandonPreference = 'ask' | 'block' | 'exclude'
+export type Preferences = { timezone: string; week_start: 'monday' | 'sunday'; default_plan_mode: PlanMode; show_completed_today: boolean; default_abandon_parent_effect: AbandonPreference }
 export type WeeklyReview = {
   week_start: string
   week_end: string

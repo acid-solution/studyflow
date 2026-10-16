@@ -10,6 +10,7 @@ import { SyncProvider, SyncStatus, clearSyncCursor } from './sync'
 import TaskDrawer from './TaskDrawer'
 import { GoalEditor, PlanCreator, VersionEditor } from './CreationDialogs'
 import PlanOutline from './PlanOutline'
+import AbandonFlow from './AbandonFlow'
 import type { Dashboard, GoalNode, ImportDraft, PlanDetail, PlanImportResult, PlanImportView, PlanMode, PlanSummary, PlanVersion, Preferences, Session, Task, TaskSource, WeeklyReview } from './types'
 
 type Page = 'today' | 'goals' | 'plans' | 'plan-detail' | 'tasks' | 'reviews' | 'imports' | 'settings'
@@ -119,15 +120,11 @@ function completionWarning(reason: unknown, scope: 'goal' | 'plan') {
   return window.confirm(`${detail}\n\n系统只提供进度提醒。是否仍确认目标已经达成？`)
 }
 
-function chooseParentEffect(label: string) {
-  const value = window.prompt(`放弃“${label}”后如何影响上层？\n输入 block：继续阻塞上层完成\n输入 exclude：从上层判断中排除`, 'block')
-  return value === 'block' || value === 'exclude' ? value : null
-}
-
 function GoalsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: string) => void }) {
   const { data, error, reload } = useLoad(() => api<GoalNode[]>(token, '/goals/tree'), [token], ['goals'])
   const [editor, setEditor] = useState<{ initial?: GoalNode; parentID?: string } | null>(null)
   const [planGoalID, setPlanGoalID] = useState<string | null>(null)
+  const [abandoning, setAbandoning] = useState<GoalNode | null>(null)
   const [notice, setNotice] = useState('')
   const run = async (job: () => Promise<unknown>) => { setNotice(''); try { await job(); await reload() } catch (reason) { setNotice(messageOf(reason)) } }
   const complete = (goal: GoalNode) => run(async () => {
@@ -137,19 +134,15 @@ function GoalsPage({ token, onOpenPlan }: { token: string; onOpenPlan: (id: stri
       await api(token, `/goals/${goal.id}/complete`, { method: 'POST', body: JSON.stringify({ acknowledge_incomplete: true }) })
     }
   })
-  const abandon = async (goal: GoalNode) => {
-    const effect = goal.parent_goal_id ? chooseParentEffect(goal.title) : ''
-    if (goal.parent_goal_id && !effect) return
-    await run(() => api(token, `/goals/${goal.id}/abandon`, { method: 'POST', body: JSON.stringify({ parent_effect: effect }) }))
-  }
   const reopen = (goal: GoalNode) => run(() => api(token, `/goals/${goal.id}/reopen`, { method: 'POST' }))
   const togglePolicy = (goal: GoalNode) => run(() => api(token, `/goals/${goal.id}/completion-policy`, { method: 'PATCH', body: JSON.stringify({ parent_effect: goal.excluded_from_parent_completion ? 'block' : 'exclude' }) }))
   return <PageFrame eyebrow="目标" title="想达成什么，从这里开始" description="先写下目标，再拆分目标或添加学习计划，逐步落实到行动。" action={<button className="button button-primary" onClick={() => setEditor({})}><Plus size={16} />新建目标</button>}>
     {notice && <p role="alert" className="drawer-error">{notice}</p>}
     {!data ? <LoadingBlock error={error} /> : <>
       <div className="goal-explainer"><Target size={19} /><p><strong>目标是想达成的结果，计划是具体的实现路线。</strong><span>大目标可以继续拆分；已有明确行动时，直接在目标下添加计划。</span></p></div>
-      <section className="goal-tree">{data.length ? data.map(goal => <GoalBranch key={goal.id} goal={goal} depth={0} onEdit={goal => setEditor({ initial: goal })} onAdd={goal => setEditor({ parentID: goal.id })} onAddPlan={goal => setPlanGoalID(goal.id)} onComplete={complete} onAbandon={abandon} onReopen={reopen} onTogglePolicy={togglePolicy} onOpenPlan={onOpenPlan} />) : <div className="empty-plans"><Flag size={28} /><strong>从一个你想达成的目标开始</strong><span>例如：能独立开发并上线一个后端服务。</span><button className="button" onClick={() => setEditor({})}>创建第一个目标</button></div>}</section>
+      <section className="goal-tree">{data.length ? data.map(goal => <GoalBranch key={goal.id} goal={goal} depth={0} onEdit={goal => setEditor({ initial: goal })} onAdd={goal => setEditor({ parentID: goal.id })} onAddPlan={goal => setPlanGoalID(goal.id)} onComplete={complete} onAbandon={setAbandoning} onReopen={reopen} onTogglePolicy={togglePolicy} onOpenPlan={onOpenPlan} />) : <div className="empty-plans"><Flag size={28} /><strong>从一个你想达成的目标开始</strong><span>例如：能独立开发并上线一个后端服务。</span><button className="button" onClick={() => setEditor({})}>创建第一个目标</button></div>}</section>
     </>}
+    {abandoning && <AbandonFlow key={abandoning.id} token={token} kind="goal" id={abandoning.id} title={abandoning.title} hasParent={Boolean(abandoning.parent_goal_id)} onClose={() => setAbandoning(null)} onAbandoned={notice => { setAbandoning(null); setNotice(notice); void reload() }} />}
     {editor && <GoalEditor token={token} goals={data ?? []} {...editor} onClose={() => setEditor(null)} onSaved={() => { setEditor(null); void reload() }} />}
     {planGoalID !== null && <PlanCreator token={token} goals={data ?? []} initialGoalID={planGoalID} onClose={() => setPlanGoalID(null)} onCreated={onOpenPlan} onGoalsChanged={() => { void reload() }} />}
   </PageFrame>
@@ -194,6 +187,7 @@ function PlansPage({ token, onOpen }: { token: string; onOpen: (id: string) => v
 function PlanDetailPage({ token, planID, onOpenTask }: { token: string; planID: string; onOpenTask: (task: Task, reload: () => void) => void }) {
   const { data, error, reload } = useLoad(() => api<PlanDetail>(token, `/plans/${planID}`), [token, planID], ['plan-detail'])
   const [selectedID, setSelectedID] = useState(() => new URLSearchParams(window.location.search).get('version_id') ?? '')
+  const [abandoning, setAbandoning] = useState(false)
   const [versionEditor, setVersionEditor] = useState<'create' | 'edit' | null>(null)
   const [notice, setNotice] = useState('')
   const [showCanceled, setShowCanceled] = useState(false)
@@ -233,18 +227,18 @@ function PlanDetailPage({ token, planID, onOpenTask }: { token: string; planID: 
     }
     await reload()
   }
-  const abandon = async () => { const effect = chooseParentEffect(data.plan.title); if (effect) await run(() => api(token, `/plans/${data.plan.id}/abandon`, { method: 'POST', body: JSON.stringify({ parent_effect: effect }) })) }
   const reopen = () => run(() => api(token, `/plans/${data.plan.id}/reopen`, { method: 'POST' }))
   const togglePolicy = () => run(() => api(token, `/plans/${data.plan.id}/completion-policy`, { method: 'PATCH', body: JSON.stringify({ parent_effect: data.plan.excluded_from_goal_completion ? 'block' : 'exclude' }) }))
   const hasDraft = data.versions.some((version) => version.status === 'draft')
   const canceledCount = data.versions.filter(version => version.status === 'canceled').length
   if (!visibleVersions.length) return <PageFrame eyebrow="计划详情" title={data.plan.title} description={data.plan.description}>
+    {abandoning && <AbandonFlow token={token} kind="plan" id={data.plan.id} title={data.plan.title} hasParent onClose={() => setAbandoning(false)} onAbandoned={notice => { setAbandoning(false); setNotice(notice); void reload() }} />}
     {versionEditor && <VersionEditor token={token} planID={data.plan.id} creating onClose={() => setVersionEditor(null)} onSaved={id => { setVersionEditor(null); setSelectedID(id); void reload() }} />}
     <p className="muted-copy">没有当前版本或可用草稿。已取消的草稿不会参与学习执行。</p>
     {notice && <p className="drawer-error">{notice}</p>}
     <div className="topbar-actions">{canceledCount > 0 && <button className="button" onClick={() => setShowCanceled(true)}>查看已取消草稿（{canceledCount}）</button>}{data.plan.status === 'active' && <button className="button" onClick={() => void createVersion('blank')}>新建草稿</button>}</div>
   </PageFrame>
-  return <PageFrame eyebrow={selected.mode === 'calendar' ? '按日期版本' : '按课时版本'} title={data.plan.title} description={data.plan.description || '每个版本是一套独立方案，切换不会合并进度。'} action={<div className="topbar-actions">{data.plan.status === 'active' ? <><button className="button" onClick={complete}>确认达成</button><button className="button" onClick={abandon}>放弃计划</button></> : <><button className="button button-primary" onClick={reopen}>恢复计划</button>{data.plan.status === 'abandoned' && <button className="button" onClick={togglePolicy}>{data.plan.excluded_from_goal_completion ? '改为阻塞上层' : '改为从上层排除'}</button>}</>}</div>}>
+  return <PageFrame eyebrow={selected.mode === 'calendar' ? '按日期版本' : '按课时版本'} title={data.plan.title} description={data.plan.description || '每个版本是一套独立方案，切换不会合并进度。'} action={<div className="topbar-actions">{data.plan.status === 'active' ? <><button className="button" onClick={complete}>确认达成</button><button className="button" onClick={() => setAbandoning(true)}>放弃计划</button></> : <><button className="button button-primary" onClick={reopen}>恢复计划</button>{data.plan.status === 'abandoned' && <button className="button" onClick={togglePolicy}>{data.plan.excluded_from_goal_completion ? '改为阻塞上层' : '改为从上层排除'}</button>}</>}</div>}>
     <section className="summary-strip plan-summary-strip"><div><span>计划目标</span><strong>{data.plan.objective}</strong></div><div><span>完成标准</span><strong>{data.plan.success_criteria || '由你最终判断'}</strong></div><div><span>目标日期</span><strong>{data.plan.target_date || '未设置'}</strong></div><div><span>计划状态</span><strong>{data.plan.status === 'active' ? '进行中' : data.plan.status === 'achieved' ? '已达成' : '已放弃'}</strong></div></section>
     {notice && <p className="drawer-error">{notice}</p>}
     <div className="version-tabs">{visibleVersions.map((version) => <button key={version.id} className={version.id === selected.id ? 'is-current' : ''} onClick={() => setSelectedID(version.id)}>V{version.version_no}<span>{version.status === 'draft' ? '草稿' : version.status === 'active' ? '当前版本' : version.status === 'canceled' ? '已取消' : '历史只读'}</span></button>)}</div>
@@ -252,6 +246,7 @@ function PlanDetailPage({ token, planID, onOpenTask }: { token: string; planID: 
     {selected.status === 'canceled' && <p className="muted-copy">此草稿已取消，仅保留记录，不会参与学习执行，也不能激活。</p>}
     {data.plan.status === 'active' && <div className="topbar-actions">{!hasDraft && <><button className="button" onClick={() => void createVersion('blank')}><Plus size={15} />空白版本</button>{selected.status !== 'canceled' && <button className="button" onClick={() => void createVersion('copy')}>以 V{selected.version_no} 为模板</button>}</>}{selected.status === 'draft' && <><button className="button" onClick={() => setVersionEditor('edit')}>编辑版本设置</button><button className="button" onClick={cancelDraft}>取消草稿</button><button className="button button-primary" onClick={activate}>激活 V{selected.version_no}</button></>}{selected.status === 'superseded' && <button className="button button-primary" onClick={activate}>切换到 V{selected.version_no}</button>}</div>}
     <section className="detail-layout"><div className="detail-main"><PlanOutline key={selected.id} token={token} plan={data.plan} version={selected} reload={reload} onOpenTask={task => onOpenTask(task, reload)} /></div><aside className="detail-aside"><section><h3>版本信息</h3><dl><div><dt>版本</dt><dd>V{selected.version_no}</dd></div><div><dt>状态</dt><dd>{selected.status === 'draft' ? '草稿' : selected.status === 'active' ? '当前版本' : selected.status === 'canceled' ? '已取消' : '历史只读'}</dd></div><div><dt>推进方式</dt><dd>{selected.mode === 'calendar' ? '按日期' : '按课时'}</dd></div><div><dt>每周投入</dt><dd>{minutes(selected.weekly_capacity_minutes)}</dd></div><div><dt>开始日期</dt><dd>{selected.start_date || '未设置'}</dd></div><div><dt>结束日期</dt><dd>{selected.end_date || '未设置'}</dd></div><div><dt>模板来源</dt><dd>{selected.source_version_id ? `版本 ${data.versions.find(item => item.id === selected.source_version_id)?.version_no ?? '历史'}` : '空白创建'}</dd></div></dl></section>{selected.status === 'superseded' && <p className="muted-copy">历史版本只读；切换为当前版本后才能继续执行。</p>}</aside></section>
+    {abandoning && <AbandonFlow token={token} kind="plan" id={data.plan.id} title={data.plan.title} hasParent onClose={() => setAbandoning(false)} onAbandoned={notice => { setAbandoning(false); setNotice(notice); void reload() }} />}
     {versionEditor && <VersionEditor token={token} planID={data.plan.id} version={selected} creating={versionEditor === 'create'} onClose={() => setVersionEditor(null)} onSaved={id => { setVersionEditor(null); setSelectedID(id); void reload() }} />}
 
   </PageFrame>
@@ -278,10 +273,24 @@ function ReviewPage({ token }: { token: string }) {
 
 function SettingsPage({ token, account, onLogout }: { token: string; account: Account; onLogout: () => void }) {
   const { data, error, reload } = useLoad(() => api<Preferences>(token, '/preferences'), [token], ['preferences'])
-  const save = async (changes: Partial<Preferences>) => { await api(token, '/preferences', { method: 'PATCH', body: JSON.stringify(changes) }); await reload() }
+  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState('')
+  const save = async (changes: Partial<Preferences>) => {
+    setSaving(true); setNotice('')
+    try { await api(token, '/preferences', { method: 'PATCH', body: JSON.stringify(changes) }); await reload(); setNotice('偏好已保存。') }
+    catch (reason) { setNotice(messageOf(reason)) }
+    finally { setSaving(false) }
+  }
   return <PageFrame eyebrow="个人空间" title="设置" description="管理计划偏好和当前账号。">
     <section className="settings-card account-card"><div className="settings-title"><span className="settings-icon"><ShieldCheck size={18} /></span><div><h2>共享认证账号</h2><p>StudyFlow 使用 shared-auth 提供的 UUID 身份。</p></div></div><div className="account-profile"><span className="large-avatar">{account.identities[0]?.value.slice(0, 1).toUpperCase() ?? 'U'}</span><div><strong>{account.identities[0]?.value ?? account.user.id}</strong><span>邮箱已验证 · {account.user.id}</span></div><button className="button" onClick={onLogout}><LogOut size={15} />退出登录</button></div></section>
-    {!data ? <LoadingBlock error={error} /> : <section className="settings-card"><div className="settings-title"><span className="settings-icon"><Settings size={18} /></span><div><h2>计划偏好</h2><p>用于首页日期和周度复盘。</p></div></div><div className="setting-row"><div><strong>每周开始日</strong><span>决定周报统计范围</span></div><select value={data.week_start} onChange={(event) => save({ week_start: event.target.value as Preferences['week_start'] })}><option value="monday">星期一</option><option value="sunday">星期日</option></select></div><div className="setting-row"><div><strong>默认计划方式</strong><span>新建计划时的默认选择</span></div><select value={data.default_plan_mode} onChange={(event) => save({ default_plan_mode: event.target.value as PlanMode })}><option value="calendar">按日期</option><option value="sequence">按课时</option></select></div><div className="setting-row"><div><strong>首页显示已完成任务</strong><span>当天完成后继续保留</span></div><button className={data.show_completed_today ? 'switch is-on' : 'switch'} onClick={() => save({ show_completed_today: !data.show_completed_today })}><span /></button></div></section>}
+    {notice && <p className="creation-note" role="status">{notice}</p>}
+    {!data ? <LoadingBlock error={error} /> : <section className="settings-card">
+      <div className="settings-title"><span className="settings-icon"><Settings size={18} /></span><div><h2>计划偏好</h2><p>设置会保存在当前账号中。</p></div></div>
+      <div className="setting-row"><div><strong>每周开始日</strong><span>决定周报统计范围</span></div><select disabled={saving} value={data.week_start} onChange={event => void save({ week_start: event.target.value as Preferences['week_start'] })}><option value="monday">星期一</option><option value="sunday">星期日</option></select></div>
+      <div className="setting-row"><div><strong>默认计划方式</strong><span>新建计划时的默认选择</span></div><select disabled={saving} value={data.default_plan_mode} onChange={event => void save({ default_plan_mode: event.target.value as PlanMode })}><option value="calendar">按日期</option><option value="sequence">按课时</option></select></div>
+      <div className="setting-row"><div><strong>放弃操作</strong><span>目标和计划共用；设置默认后，点击放弃会直接执行。</span></div><select aria-label="放弃操作" disabled={saving} value={data.default_abandon_parent_effect || 'ask'} onChange={event => void save({ default_abandon_parent_effect: event.target.value as Preferences['default_abandon_parent_effect'] })}><option value="ask">每次询问</option><option value="exclude">默认排除，不再弹窗</option><option value="block">默认阻塞，不再弹窗</option></select></div>
+      <div className="setting-row"><div><strong>首页显示已完成任务</strong><span>当天完成后继续保留</span></div><button disabled={saving} className={data.show_completed_today ? 'switch is-on' : 'switch'} onClick={() => void save({ show_completed_today: !data.show_completed_today })}><span /></button></div>
+    </section>}
   </PageFrame>
 }
 

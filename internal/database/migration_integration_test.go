@@ -36,6 +36,22 @@ func TestMigrationsFromEmptyAndRollback(t *testing.T) {
 	if _, err := sqlDB.Exec("INSERT INTO goals (id,user_id,title,description,success_criteria,status,version,created_at,updated_at) VALUES (?,?,'preserved','','','active',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))", preservedGoal, preservedGoal); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := sqlDB.Exec("INSERT INTO user_preferences (user_id,timezone,week_start,default_plan_mode,show_completed_today,default_abandon_parent_effect,created_at,updated_at) VALUES (?,'Asia/Shanghai','sunday','sequence',true,'exclude',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))", preservedGoal); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.DownTo(sqlDB, "../../migrations", 7); err != nil {
+		t.Fatal(err)
+	}
+	if columnExists(t, sqlDB, "user_preferences", "default_abandon_parent_effect") {
+		t.Fatal("abandon preference column survived rollback")
+	}
+	if err := goose.Up(sqlDB, "../../migrations"); err != nil {
+		t.Fatal(err)
+	}
+	var abandonDefault, weekStart, planMode string
+	if err := sqlDB.QueryRow("SELECT default_abandon_parent_effect,week_start,default_plan_mode FROM user_preferences WHERE user_id = ?", preservedGoal).Scan(&abandonDefault, &weekStart, &planMode); err != nil || abandonDefault != "ask" || weekStart != "sunday" || planMode != "sequence" {
+		t.Fatalf("existing preferences changed during upgrade: %s %s %s %v", abandonDefault, weekStart, planMode, err)
+	}
 	if err := goose.DownTo(sqlDB, "../../migrations", 6); err != nil {
 		t.Fatalf("roll back notifications: %v", err)
 	}
@@ -64,6 +80,7 @@ func TestMigrationsFromEmptyAndRollback(t *testing.T) {
 		"goals":                "excluded_from_parent_completion",
 		"notification_streams": "pruned_through",
 		"notification_outbox":  "sequence",
+		"user_preferences":     "default_abandon_parent_effect",
 	} {
 		if !columnExists(t, sqlDB, table, column) {
 			t.Fatalf("expected %s.%s after migration", table, column)

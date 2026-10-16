@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useEffect, useId, useRef, useState } from 'react'
+import { FormEvent, ReactNode, useLayoutEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ArrowLeft, ArrowRight, BookOpen, CalendarDays, Check, Plus, X } from 'lucide-react'
 import { api } from './api'
@@ -11,7 +11,7 @@ export function EditorDialog({ title, description, onClose, children }: { title:
   const panel = useRef<HTMLDivElement>(null)
   const close = useRef(onClose)
   close.current = onClose
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previous = document.activeElement as HTMLElement | null
     const overflow = document.body.style.overflow
     const siblings = Array.from(document.body.children).filter((node): node is HTMLElement => node instanceof HTMLElement && !node.contains(panel.current))

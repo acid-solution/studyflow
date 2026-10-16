@@ -28,6 +28,10 @@ const (
 	// imported it over MCP.
 	SourceUser  = "user"
 	SourceAgent = "agent"
+
+	AbandonPreferenceAsk     = "ask"
+	AbandonPreferenceBlock   = "block"
+	AbandonPreferenceExclude = "exclude"
 )
 
 type Goal struct {
@@ -151,11 +155,12 @@ type PlanImport struct {
 }
 
 type UserPreference struct {
-	UserID             string `gorm:"type:char(36);primaryKey"`
-	Timezone           string `gorm:"type:varchar(64);not null"`
-	WeekStart          string `gorm:"type:varchar(16);not null"`
-	DefaultPlanMode    string `gorm:"type:varchar(16);not null"`
-	ShowCompletedToday bool   `gorm:"not null"`
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	UserID                     string `gorm:"type:char(36);primaryKey"`
+	Timezone                   string `gorm:"type:varchar(64);not null"`
+	WeekStart                  string `gorm:"type:varchar(16);not null"`
+	DefaultPlanMode            string `gorm:"type:varchar(16);not null"`
+	ShowCompletedToday         bool   `gorm:"not null"`
+	DefaultAbandonParentEffect string `gorm:"type:varchar(16);not null;default:ask"`
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
 }

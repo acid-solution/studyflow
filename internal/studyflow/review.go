@@ -10,17 +10,19 @@ import (
 )
 
 type PreferenceView struct {
-	Timezone           string `json:"timezone"`
-	WeekStart          string `json:"week_start"`
-	DefaultPlanMode    string `json:"default_plan_mode"`
-	ShowCompletedToday bool   `json:"show_completed_today"`
+	Timezone                   string `json:"timezone"`
+	WeekStart                  string `json:"week_start"`
+	DefaultPlanMode            string `json:"default_plan_mode"`
+	ShowCompletedToday         bool   `json:"show_completed_today"`
+	DefaultAbandonParentEffect string `json:"default_abandon_parent_effect"`
 }
 
 type UpdatePreferenceInput struct {
-	Timezone           *string `json:"timezone"`
-	WeekStart          *string `json:"week_start"`
-	DefaultPlanMode    *string `json:"default_plan_mode"`
-	ShowCompletedToday *bool   `json:"show_completed_today"`
+	Timezone                   *string `json:"timezone"`
+	WeekStart                  *string `json:"week_start"`
+	DefaultPlanMode            *string `json:"default_plan_mode"`
+	ShowCompletedToday         *bool   `json:"show_completed_today"`
+	DefaultAbandonParentEffect *string `json:"default_abandon_parent_effect"`
 }
 
 type DailyInvestment struct {
@@ -61,7 +63,7 @@ func (s *Service) GetPreferences(ctx context.Context, userID string) (*Preferenc
 		return nil, err
 	}
 	now := s.now().UTC()
-	created := model.UserPreference{UserID: userID, Timezone: "Asia/Shanghai", WeekStart: "monday", DefaultPlanMode: model.PlanModeCalendar, ShowCompletedToday: true, CreatedAt: now, UpdatedAt: now}
+	created := model.UserPreference{UserID: userID, Timezone: "Asia/Shanghai", WeekStart: "monday", DefaultPlanMode: model.PlanModeCalendar, ShowCompletedToday: true, DefaultAbandonParentEffect: model.AbandonPreferenceAsk, CreatedAt: now, UpdatedAt: now}
 	if err := s.repo.CreatePreferenceIfMissing(ctx, &created); err != nil {
 		return nil, err
 	}
@@ -99,6 +101,13 @@ func (s *Service) UpdatePreferences(ctx context.Context, userID string, input Up
 	}
 	if input.ShowCompletedToday != nil {
 		changes["show_completed_today"] = *input.ShowCompletedToday
+	}
+	if input.DefaultAbandonParentEffect != nil {
+		value := *input.DefaultAbandonParentEffect
+		if value != model.AbandonPreferenceAsk && value != model.AbandonPreferenceBlock && value != model.AbandonPreferenceExclude {
+			return nil, ErrValidation
+		}
+		changes["default_abandon_parent_effect"] = value
 	}
 	if len(changes) == 0 {
 		return current, nil
@@ -246,7 +255,7 @@ func (s *Service) loadWeeklyReview(ctx context.Context, userID string, location 
 }
 
 func preferenceView(value model.UserPreference) *PreferenceView {
-	return &PreferenceView{Timezone: value.Timezone, WeekStart: value.WeekStart, DefaultPlanMode: value.DefaultPlanMode, ShowCompletedToday: value.ShowCompletedToday}
+	return &PreferenceView{Timezone: value.Timezone, WeekStart: value.WeekStart, DefaultPlanMode: value.DefaultPlanMode, ShowCompletedToday: value.ShowCompletedToday, DefaultAbandonParentEffect: value.DefaultAbandonParentEffect}
 }
 func beginningOfWeek(value time.Time, weekStart string) time.Time {
 	start := time.Monday
