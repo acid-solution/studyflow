@@ -33,7 +33,7 @@ if (-not (Test-Path -LiteralPath .env.compose)) {
 | `CACHE_ENABLED` | 程序默认 false，配置示例开启 |
 | `REDIS_ADDR`、`REDIS_DB`、`CACHE_TTL` | `127.0.0.1:6379`、0、`30s` |
 | `REDIS_PASSWORD` | 仅外部有密码 Redis；自带 Compose Redis 不需要 |
-| `NOTIFICATION_POLL_INTERVAL`、`NOTIFICATION_RETENTION` | `1s`、`168h` |
+| `NOTIFICATION_RETENTION` | `168h`；提交后本地唤醒投递，无投递轮询间隔配置 |
 | `STUDYFLOW_MCP_RESOURCE` | 路线代办令牌受众，需与 shared-auth 和 JobPilot 完全一致 |
 
 程序读取当前目录的 `.env`，已有进程环境优先。Compose 变量与程序配置是不同入口，不能只改其中一份后假定另一份已更新。

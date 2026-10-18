@@ -80,6 +80,14 @@ export function SyncProvider({ token, userID, onUnauthorized, children }: { toke
       pending = { topics: [...new Set([...(pending?.topics ?? []), ...change.topics])], resources: [...(pending?.resources ?? []), ...change.resources], reset: Boolean(pending?.reset || change.reset) }
       if (!timer) timer = setTimeout(() => { const next = pending; pending = null; timer = undefined; if (next) listeners.current.forEach((listener) => listener(next)) }, 300)
     }
+    // Returning to the page verifies current data independently of event replay.
+    // Use the same query signal, so dirty editors keep their input and revision.
+    const restore = () => {
+      if (document.visibilityState === 'visible') queue({ topics: ['*'], resources: [], reset: false })
+    }
+    document.addEventListener('visibilitychange', restore)
+    window.addEventListener('focus', restore)
+    window.addEventListener('pageshow', restore)
     const run = async () => {
       let failures = 0
       while (!controller.signal.aborted) {
@@ -108,7 +116,12 @@ export function SyncProvider({ token, userID, onUnauthorized, children }: { toke
       }
     }
     void run()
-    return () => { controller.abort(); if (timer) clearTimeout(timer); if (pending) listeners.current.forEach((listener) => listener(pending!)) }
+    return () => {
+      document.removeEventListener('visibilitychange', restore)
+      window.removeEventListener('focus', restore)
+      window.removeEventListener('pageshow', restore)
+      controller.abort(); if (timer) clearTimeout(timer); if (pending) listeners.current.forEach((listener) => listener(pending!))
+    }
   }, [token, userID])
   const signal = useMemo(() => ({ subscribe, status }), [subscribe, status])
   return <SyncContext.Provider value={signal}>{children}</SyncContext.Provider>

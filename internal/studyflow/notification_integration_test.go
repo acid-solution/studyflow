@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gorm.io/gorm"
 	"studyflow/internal/database"
 	"studyflow/internal/identity"
@@ -326,7 +327,7 @@ func TestSSEMultiClientReplayAndExpiryIntegration(t *testing.T) {
 	hub.Start(ctx)
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	service := NewServiceWithRepository(repo, nil)
+	service := NewServiceWithRepository(repo, nil, hub)
 	RegisterRoutes(router, NewHTTPHandler(service), auth.Middleware(), db)
 	RegisterNotifications(router, hub, auth.Middleware())
 	server := httptest.NewServer(router)
@@ -436,11 +437,11 @@ func TestNotificationSlowConsumerAndPrunedCursorIntegration(t *testing.T) {
 	}
 	defer unsubscribe()
 	for i := 0; i < 2; i++ {
-		if _, err := NewServiceWithRepository(repo, nil).CreateGoal(ctx, user, CreateGoalInput{Title: "burst"}); err != nil {
+		if _, err := NewServiceWithRepository(repo, nil, hub).CreateGoal(ctx, user, CreateGoalInput{Title: "burst"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	hub.PollOnce(ctx)
+	hub.Start(ctx)
 	select {
 	case <-client.done:
 	case <-time.After(time.Second):
@@ -458,6 +459,55 @@ func TestNotificationSlowConsumerAndPrunedCursorIntegration(t *testing.T) {
 	}
 	stream.next(t, "sync.ready")
 	stream.response.Body.Close()
+}
+
+func TestSSEMCPPostCommitAndIdempotentReplayIntegration(t *testing.T) {
+	_, repo, user := notificationDB(t)
+	hub := NewNotificationHub(repo, nil, nil, NotificationOptions{})
+	hub.Start(t.Context())
+	defer hub.closeAll()
+	service := NewServiceWithRepository(repo, nil, hub)
+	goal, err := service.CreateGoal(t.Context(), user, CreateGoalInput{Title: "MCP sync"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, sign := notificationTestAuth(t)
+	router := gin.New()
+	RegisterNotifications(router, hub, auth.Middleware())
+	RegisterMCP(router, service, auth, nil)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	token := sign(user, time.Minute)
+	stream := openNotificationClient(t, server.URL, token, "")
+	defer stream.response.Body.Close()
+	stream.next(t, "sync.reset")
+	stream.next(t, "sync.ready")
+	client, err := connectMCP(t.Context(), server.URL+"/mcp", token, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	args := map[string]any{
+		"goal_id": goal.ID, "idempotency_key": uuid.NewString(),
+		"title": "Imported plan", "objective": "Verify MCP sync", "mode": "sequence",
+		"tasks": []any{map[string]any{"title": "First task", "estimate_minutes": 30}},
+	}
+	for i := 0; i < 2; i++ {
+		result, err := client.CallTool(t.Context(), &mcp.CallToolParams{Name: "import_plan_tree", Arguments: args})
+		if err != nil || result.IsError {
+			t.Fatalf("MCP import: result=%+v error=%v", result, err)
+		}
+		if i == 0 {
+			if frame := stream.next(t, "business.changed"); frame.id != "2" || !strings.Contains(frame.data, "plan.imported") {
+				t.Fatalf("MCP did not wake online stream after commit: %+v", frame)
+			}
+		}
+	}
+	select {
+	case frame := <-stream.frames:
+		t.Fatalf("idempotent replay emitted another notification: %+v", frame)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 type gatedReplayRepository struct {
@@ -486,7 +536,8 @@ func TestSSENoGapBetweenReplayAndLiveIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	gate := &gatedReplayRepository{Repository: repo, entered: make(chan struct{}), release: make(chan struct{})}
-	hub := NewNotificationHub(gate, nil, nil, NotificationOptions{PollInterval: 20 * time.Millisecond})
+	hub := NewNotificationHub(gate, nil, nil, NotificationOptions{})
+	s = NewServiceWithRepository(repo, nil, hub)
 	hub.Start(ctx)
 	defer hub.closeAll()
 	auth, sign := notificationTestAuth(t)

@@ -54,9 +54,10 @@ func titleTooLong(value string, limit int) bool {
 }
 
 type Service struct {
-	repo  Repository
-	now   func() time.Time
-	cache Cache
+	repo          Repository
+	now           func() time.Time
+	cache         Cache
+	notifications NotificationWaker
 }
 
 type CreateGoalInput struct {

@@ -65,8 +65,8 @@ func main() {
 		defer closer.Close()
 	}
 	repo := app.NewGORMRepository(db)
-	service := app.NewServiceWithRepository(repo, store)
-	notifications := app.NewNotificationHub(repo, store, logger, app.NotificationOptions{PollInterval: cfg.NotificationPollInterval, Retention: cfg.NotificationRetention})
+	notifications := app.NewNotificationHub(repo, store, logger, app.NotificationOptions{Retention: cfg.NotificationRetention})
+	service := app.NewServiceWithRepository(repo, store, notifications)
 	notifications.Start(root)
 	handler := app.NewHTTPHandler(service)
 

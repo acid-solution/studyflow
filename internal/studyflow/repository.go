@@ -174,12 +174,17 @@ func NewServiceWithCache(db *gorm.DB, cache Cache) *Service {
 }
 
 // NewServiceWithRepository is useful for focused unit tests and alternative
-// persistence implementations. Passing a nil cache disables caching.
-func NewServiceWithRepository(repo Repository, cache Cache) *Service {
+// persistence implementations. Passing a nil cache disables caching. Online
+// deployments supply the local hub; headless callers can omit the waker.
+func NewServiceWithRepository(repo Repository, cache Cache, wakers ...NotificationWaker) *Service {
 	if cache == nil {
 		cache = noopCache{}
 	}
-	return &Service{repo: repo, now: time.Now, cache: cache}
+	service := &Service{repo: repo, now: time.Now, cache: cache}
+	if len(wakers) > 0 {
+		service.notifications = wakers[0]
+	}
+	return service
 }
 
 func (r *gormRepository) WithinTransaction(ctx context.Context, fn func(Repository) error) error {

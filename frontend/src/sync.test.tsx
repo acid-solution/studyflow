@@ -48,6 +48,35 @@ describe('notification stream protocol', () => {
 const initialTask: Task = { id: 'task-1', plan_id: 'plan-1', plan_title: '测试计划', plan_mode: 'calendar', plan_version_id: 'version-1', milestone_id: null, title: '原任务', description: '', estimate_minutes: 60, scheduled_date: null, position: 1, status: 'todo', version: 1, source: 'user', completed_at: null, is_overdue: false, plan_status: 'active', version_status: 'active' }
 
 describe('multi-client refresh UI', () => {
+  it('refreshes once on page return without changing replay progress and removes return listeners on unmount', async () => {
+    const stream = streamMock()
+    const load = vi.fn(async () => '当前数据')
+    function View() { const result = useLoad(load, [], ['tasks']); return <span>{result.data}</span> }
+    const view = render(<SyncProvider token="token-a" userID="user-a" onUnauthorized={async () => undefined}><View /></SyncProvider>)
+    await screen.findByText('当前数据')
+    stream.send('id: 7\nevent: sync.reset\ndata: {"cursor":"7"}\n\nevent: sync.ready\ndata: {}\n\n')
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2))
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    visibility.mockReturnValue('hidden')
+    fireEvent(document, new Event('visibilitychange'))
+    fireEvent.focus(window)
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    expect(load).toHaveBeenCalledTimes(2)
+    visibility.mockReturnValue('visible')
+    fireEvent(document, new Event('visibilitychange'))
+    fireEvent.focus(window)
+    fireEvent(window, new Event('pageshow'))
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(3))
+    expect(sessionStorage.getItem(`studyflow-sync:${API_URL}:user-a`)).toBe('7')
+    expect(stream.streams).toHaveLength(1)
+    const documentRemove = vi.spyOn(document, 'removeEventListener')
+    const windowRemove = vi.spyOn(window, 'removeEventListener')
+    view.unmount()
+    expect(documentRemove).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+    expect(windowRemove).toHaveBeenCalledWith('focus', expect.any(Function))
+    expect(windowRemove).toHaveBeenCalledWith('pageshow', expect.any(Function))
+    expect(stream.streams[0].signal.aborted).toBe(true)
+  })
   it('keeps an unsaved timer note when another client ends or replaces the timer', async () => {
     const stream = streamMock()
     const firstSession = { id: 'session-1', task_id: 'task-1', started_at: '2026-10-14T00:00:00Z', ended_at: null, duration_seconds: 0, note: '', status: 'running' as const }
@@ -86,7 +115,8 @@ describe('multi-client refresh UI', () => {
     await waitFor(() => expect(screen.getByLabelText('任务名称')).toHaveValue('另一个客户端修改'))
     fireEvent.change(screen.getByLabelText('任务名称'), { target: { value: '未保存输入' } })
     latest = { ...initialTask, title: '再次修改', version: 3 }
-    stream.send(frameText(event('2')) + frameText(event('2')))
+    // Return-to-page refresh must preserve the same dirty snapshot as SSE.
+    fireEvent.focus(window)
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('数据已在其他客户端更新'))
     expect(screen.getByLabelText('任务名称')).toHaveValue('未保存输入')
     expect(screen.getByRole('button', { name: '保存修改' })).toBeDisabled()
@@ -95,7 +125,7 @@ describe('multi-client refresh UI', () => {
     fireEvent.click(screen.getByRole('button', { name: '重新加载最新数据' }))
     await waitFor(() => expect(screen.getByLabelText('任务名称')).toHaveValue('再次修改'))
     fireEvent.change(screen.getByLabelText('任务名称'), { target: { value: '保留被删任务输入' } })
-    deleted = true; stream.send(frameText(event('3')))
+    deleted = true; stream.send(frameText(event('2')))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('任务已被删除'))
     expect(screen.getByLabelText('任务名称')).toHaveValue('保留被删任务输入')
     expect(screen.getByRole('button', { name: '保存修改' })).toBeDisabled()

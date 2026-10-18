@@ -19,8 +19,15 @@ type Notification struct {
 	OccurredAt time.Time              `json:"occurred_at"`
 }
 
+// NotificationWaker schedules local delivery; it performs no database or network
+// work on the request goroutine. The durable event remains in the Outbox.
+type NotificationWaker interface {
+	Wake(userID string)
+}
+
 func (s *Service) withChange(ctx context.Context, userID, kind string, fn func(Repository) error) error {
-	return s.repo.WithinTransaction(ctx, func(repo Repository) error {
+	recorded := false
+	err := s.repo.WithinTransaction(ctx, func(repo Repository) error {
 		recorder := &changeRepository{Repository: repo}
 		if err := fn(recorder); err != nil {
 			return err
@@ -28,8 +35,18 @@ func (s *Service) withChange(ctx context.Context, userID, kind string, fn func(R
 		if len(recorder.resources) == 0 {
 			return nil
 		}
-		return repo.AppendNotification(ctx, userID, kind, recorder.resources, notificationTopics(recorder.resources), s.now())
+		if err := repo.AppendNotification(ctx, userID, kind, recorder.resources, notificationTopics(recorder.resources), s.now()); err != nil {
+			return err
+		}
+		recorded = true
+		return nil
 	})
+	if err == nil && recorded && s.notifications != nil {
+		// Commit has finished. Do not use the request context: the client can
+		// disconnect now without canceling delivery of an already committed event.
+		s.notifications.Wake(userID)
+	}
+	return err
 }
 
 // Observe successful mutations to suppress notifications for idempotent no-ops.

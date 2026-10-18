@@ -43,6 +43,8 @@ React、TypeScript、Vite、Vitest；Go、Gin、GORM、MySQL、Goose、Redis；D
 
 StudyFlow 业务库使用 MySQL，Redis 只缓存聚合读。独立 shared-auth 使用自己的 PostgreSQL，业务服务只保存稳定用户 UUID。MCP 和 HTTP 共用同一应用服务及事务规则。
 
+多端同步按单 API 实例设计：事务 Outbox 保留事件供断线补发，提交后通过本地唤醒主动投递 SSE，无变更时不轮询通知日志。横向扩容前需增加跨实例唤醒机制。
+
 ## 文档入口
 
 | 需要了解什么 | 文档 |
@@ -57,4 +59,4 @@ StudyFlow 业务库使用 MySQL，Redis 只缓存聚合读。独立 shared-auth 
 | 部署、升级与恢复 | [部署说明](docs/DEPLOYMENT.md)、[CI/CD](docs/ci-cd.md) |
 | 验证方法与结果边界 | [验证指南](docs/VALIDATION.md) |
 
-文档核对日期为 2026-10-17；测试和功能存在不等于当前线上环境已完成所有业务验收。
+文档核对日期为 2026-10-18；测试和功能存在不等于当前线上环境已完成所有业务验收。
