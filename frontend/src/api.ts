@@ -63,6 +63,22 @@ export async function logout() {
   })
 }
 
+export async function deleteAccount(token: string, currentPassword: string) {
+  let currentToken = refreshInFlight ? (await refreshInFlight).access_token : token
+  const remove = async () => json<void>(await fetch(`${AUTH_URL}/auth/v1/me`, {
+    method: 'DELETE', credentials: 'include',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
+    body: JSON.stringify({ current_password: currentPassword }),
+  }))
+  try {
+    await remove()
+  } catch (error) {
+    if (!(error instanceof APIError) || error.status !== 401 || error.code !== 'unauthorized') throw error
+    currentToken = (await refreshAccess()).access_token
+    await remove()
+  }
+}
+
 export async function requestVerification(email: string) {
   return json<{ challenge_id: string; expires_at: string; resend_after: string }>(await fetch(`${AUTH_URL}/auth/v1/verifications`, {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },

@@ -4,7 +4,8 @@ import {
   Circle, Flag, Home, ListChecks, LogOut, Plus, RefreshCcw, Route, Settings,
   ShieldCheck, Target, Timer,
 } from 'lucide-react'
-import { Account, APIError, api, login, logout, refreshAccess, register, requestVerification } from './api'
+import { Account, APIError, api, deleteAccount, login, logout, refreshAccess, register, requestVerification } from './api'
+import { AccountDeletion } from './AccountDeletion'
 import { useLoad } from './data'
 import { SyncProvider, SyncStatus, clearSyncCursor } from './sync'
 import TaskDrawer from './TaskDrawer'
@@ -271,7 +272,7 @@ function ReviewPage({ token }: { token: string }) {
   </PageFrame>
 }
 
-function SettingsPage({ token, account, onLogout }: { token: string; account: Account; onLogout: () => void }) {
+function SettingsPage({ token, account, onLogout, onDelete }: { token: string; account: Account; onLogout: () => void; onDelete: (password: string) => Promise<void> }) {
   const { data, error, reload } = useLoad(() => api<Preferences>(token, '/preferences'), [token], ['preferences'])
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState('')
@@ -291,6 +292,7 @@ function SettingsPage({ token, account, onLogout }: { token: string; account: Ac
       <div className="setting-row"><div><strong>放弃操作</strong><span>目标和计划共用；设置默认后，点击放弃会直接执行。</span></div><select aria-label="放弃操作" disabled={saving} value={data.default_abandon_parent_effect || 'ask'} onChange={event => void save({ default_abandon_parent_effect: event.target.value as Preferences['default_abandon_parent_effect'] })}><option value="ask">每次询问</option><option value="exclude">默认排除，不再弹窗</option><option value="block">默认阻塞，不再弹窗</option></select></div>
       <div className="setting-row"><div><strong>首页显示已完成任务</strong><span>当天完成后继续保留</span></div><button disabled={saving} className={data.show_completed_today ? 'switch is-on' : 'switch'} onClick={() => void save({ show_completed_today: !data.show_completed_today })}><span /></button></div>
     </section>}
+    <AccountDeletion onDelete={onDelete} />
   </PageFrame>
 }
 
@@ -465,7 +467,23 @@ export default function App() {
   const openTask = (task: Task, reload: () => void) => { setSelectedTask(task); setDrawerReload(() => reload); void api<Dashboard>(token, '/dashboard/today').then((value) => setRunning(value.running_session?.session ?? null)) }
   const changed = async () => { setSelectedTask(null); setRunning(null); drawerReload?.(); setNotice('操作已保存。') }
   const openPlan = (id: string) => { setPlanID(id); setPage('plan-detail') }
-  const signOut = async () => { signingOut.current = true; authGeneration.current++; setLoggingOut(true); try { await logout() } catch (reason) { setNotice(messageOf(reason)) } finally { if (account) clearSyncCursor(account.user.id); setSelectedTask(null); setRunning(null); setDrawerReload(null); setPlanID(''); setPage('today'); setToken(''); setAccount(null); signingOut.current = false; setLoggingOut(false) } }
+  const clearSession = () => {
+    if (account) clearSyncCursor(account.user.id)
+    accountID.current = null
+    setSelectedTask(null); setRunning(null); setDrawerReload(null); setPlanID(''); setPage('today'); setNotice(''); setToken(''); setAccount(null)
+  }
+  const signOut = async () => { signingOut.current = true; authGeneration.current++; setLoggingOut(true); try { await logout() } catch (reason) { setNotice(messageOf(reason)) } finally { clearSession(); signingOut.current = false; setLoggingOut(false) } }
+  const removeAccount = async (password: string) => {
+    if (signingOut.current) throw new Error('账号操作正在进行，请稍后重试')
+    signingOut.current = true
+    authGeneration.current++
+    try {
+      await deleteAccount(token, password)
+      clearSession()
+    } finally {
+      signingOut.current = false
+    }
+  }
   const renew = useCallback(async () => {
     if (signingOut.current) return
     const generation = authGeneration.current
@@ -477,5 +495,5 @@ export default function App() {
   if (loggingOut) return <main className="auth-shell"><div className="auth-card"><strong>正在退出登录…</strong></div></main>
   if (!token || !account) return <AuthPage onAuthenticated={accept} />
   const title = page === 'today' ? ['今天', new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })] : page === 'goals' ? ['目标', '递归拆解长期目标'] : page === 'plans' ? ['学习计划', '多个计划同步推进'] : page === 'plan-detail' ? ['计划详情', '版本、阶段与任务'] : page === 'tasks' ? ['全部任务', '查询所有生效计划'] : page === 'reviews' ? ['学习复盘', '本周执行情况'] : page === 'imports' ? ['计划导入', '确认后写入'] : ['设置', '账号与计划偏好']
-  return <SyncProvider key={account.user.id} token={token} userID={account.user.id} onUnauthorized={renew}><div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><strong>StudyFlow</strong></div><nav className="navigation">{nav.map((item) => { const Icon = item.icon; return <button key={item.id} className={page === item.id || (page === 'plan-detail' && item.id === 'plans') ? 'nav-button is-current' : 'nav-button'} onClick={() => { setPage(item.id); setNotice('') }}><Icon size={18} /><span>{item.label}</span></button> })}</nav><div className="sidebar-footer"><span className="user-avatar">{account.identities[0]?.value.slice(0, 1).toUpperCase() ?? 'U'}</span><div><strong>{account.identities[0]?.value ?? '已登录用户'}</strong><span>个人空间</span></div><ChevronDown size={16} /></div></aside><main className="main-area"><SyncStatus /><header className="topbar"><div><span>{title[0]}</span><strong>{title[1]}</strong></div></header>{notice && <div className="notice"><span>{notice}</span><button onClick={() => setNotice('')}>×</button></div>}{page === 'today' && <TodayPage token={token} onOpen={openTask} />}{page === 'goals' && <GoalsPage token={token} onOpenPlan={openPlan} />}{page === 'plans' && <PlansPage token={token} onOpen={openPlan} />}{page === 'plan-detail' && planID && <PlanDetailPage token={token} planID={planID} onOpenTask={openTask} />}{page === 'tasks' && <TasksPage token={token} onOpen={openTask} />}{page === 'reviews' && <ReviewPage token={token} />}{page === 'settings' && <SettingsPage token={token} account={account} onLogout={signOut} />}{page === 'imports' && <ImportsPage token={token} onOpenPlan={openPlan} />}</main>{selectedTask && <TaskDrawer token={token} task={selectedTask} running={running} onClose={() => setSelectedTask(null)} onChanged={changed} />}</div></SyncProvider>
+  return <SyncProvider key={account.user.id} token={token} userID={account.user.id} onUnauthorized={renew}><div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-mark">S</span><strong>StudyFlow</strong></div><nav className="navigation">{nav.map((item) => { const Icon = item.icon; return <button key={item.id} className={page === item.id || (page === 'plan-detail' && item.id === 'plans') ? 'nav-button is-current' : 'nav-button'} onClick={() => { setPage(item.id); setNotice('') }}><Icon size={18} /><span>{item.label}</span></button> })}</nav><div className="sidebar-footer"><span className="user-avatar">{account.identities[0]?.value.slice(0, 1).toUpperCase() ?? 'U'}</span><div><strong>{account.identities[0]?.value ?? '已登录用户'}</strong><span>个人空间</span></div><ChevronDown size={16} /></div></aside><main className="main-area"><SyncStatus /><header className="topbar"><div><span>{title[0]}</span><strong>{title[1]}</strong></div></header>{notice && <div className="notice"><span>{notice}</span><button onClick={() => setNotice('')}>×</button></div>}{page === 'today' && <TodayPage token={token} onOpen={openTask} />}{page === 'goals' && <GoalsPage token={token} onOpenPlan={openPlan} />}{page === 'plans' && <PlansPage token={token} onOpen={openPlan} />}{page === 'plan-detail' && planID && <PlanDetailPage token={token} planID={planID} onOpenTask={openTask} />}{page === 'tasks' && <TasksPage token={token} onOpen={openTask} />}{page === 'reviews' && <ReviewPage token={token} />}{page === 'settings' && <SettingsPage token={token} account={account} onLogout={signOut} onDelete={removeAccount} />}{page === 'imports' && <ImportsPage token={token} onOpenPlan={openPlan} />}</main>{selectedTask && <TaskDrawer token={token} task={selectedTask} running={running} onClose={() => setSelectedTask(null)} onChanged={changed} />}</div></SyncProvider>
 }

@@ -368,6 +368,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .settings-page { max-width: 910px; }
 .settings-card { margin-top: 15px; overflow: hidden; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); }
 .settings-page .page-heading + .settings-card { margin-top: 23px; }
+.account-deletion { padding: 20px; }
+.account-deletion > h2 { margin: 0 0 12px; font-size: 15px; font-weight: 550; }
+.account-deletion > p { color: var(--muted); font-size: 12px; line-height: 1.8; }
+.account-deletion-form { display: grid; gap: 12px; margin-top: 18px; max-width: 620px; font-size: 13px; }
+.account-deletion-form > input { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--surface-alt); font: inherit; }
+.account-deletion-check { display: flex; align-items: flex-start; gap: 9px; line-height: 1.7; }
+.account-deletion-check input { flex: none; margin-top: 5px; }
+.account-deletion-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .settings-title { display: flex; align-items: center; gap: 11px; padding: 15px 17px; border-bottom: 1px solid var(--border); }
 .settings-icon { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; color: var(--primary); background: var(--primary-soft); }
 .settings-title h2, .settings-title p { margin: 0; }
