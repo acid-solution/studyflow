@@ -16,11 +16,14 @@
   --danger: #b64b45;
   --danger-soft: #fff5f3;
   --shadow: rgb(28 39 60 / 10%);
+  --site-footer-height: 40px;
 }
 
 * { box-sizing: border-box; }
 html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }
 body { min-height: 100vh; background: var(--canvas); }
+.site-footer { display: grid; min-height: var(--site-footer-height); place-items: center; padding: 8px 16px; color: var(--muted); background: var(--canvas); font-size: 12px; line-height: 1.5; text-align: center; }
+.site-footer a { color: inherit; text-underline-offset: 0.2em; }
 button, input, select { color: inherit; font: inherit; }
 button { cursor: pointer; }
 textarea { color: inherit; font: inherit; }
@@ -84,7 +87,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .quick-add span { margin-top: 3px; color: var(--muted); font-size: 10px; }
 .quick-add input, .quick-add select { min-height: 39px; padding: 0 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
 
-.auth-shell { display: grid; min-height: 100vh; place-items: center; padding: 28px; background: radial-gradient(circle at 35% 0%, #e8f0ff, transparent 42%), var(--canvas); }
+.auth-shell { display: grid; min-height: calc(100vh - var(--site-footer-height)); place-items: center; padding: 28px; background: radial-gradient(circle at 35% 0%, #e8f0ff, transparent 42%), var(--canvas); }
 .auth-card { width: min(430px, 100%); padding: 28px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: 0 24px 65px rgb(25 36 58 / 12%); }
 .auth-brand { display: flex; align-items: center; gap: 13px; }
 .auth-brand strong, .auth-brand span { display: block; }
